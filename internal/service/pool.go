@@ -2,102 +2,202 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
-	"github.com/gylive/ccodex-sleep-state/internal/settings"
 	"net/http"
+	"os"
+
+	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
+	"github.com/gylive/ccodex-sleep-state/internal/settings"
 )
 
-type advancedPreferences struct {
-	ExternalProxyOnly bool   `json:"external_proxy_only"`
-	RequestLimitMiB   int    `json:"request_limit_mib"`
-	ZstdWindowMiB     int    `json:"zstd_window_mib"`
-	CompactLimitMiB   int    `json:"compact_limit_mib"`
-	EgressMode        string `json:"egress_mode"`
-	EgressRoute       string `json:"egress_route"`
-	PoolEnabled       bool   `json:"pool_enabled"`
+func routeSelected(c settings.Config, id string) bool {
+	if c.PinnedRoute != "" {
+		return c.PinnedRoute == id
+	}
+	if len(c.SelectedRoutes) == 0 {
+		return true
+	}
+	for _, selected := range c.SelectedRoutes {
+		if selected == id {
+			return true
+		}
+	}
+	return false
+}
+func validateSelection(routes []proxyroute.Route, c settings.Config) error {
+	for _, route := range routes {
+		if routeSelected(c, route.ID) {
+			return nil
+		}
+	}
+	return errors.New("所选节点已不在来源中。请先选择其它节点；原有连接保持不变")
+}
+func sourceID(value any) string {
+	b, _ := json.Marshal(value)
+	hash := sha256.Sum256(b)
+	return hex.EncodeToString(hash[:16])
+}
+func appendSource(sources []settings.Source, source settings.Source) []settings.Source {
+	for _, old := range sources {
+		if sourceID(old) == sourceID(source) {
+			return sources
+		}
+	}
+	return append(sources, source)
 }
 
-func advancedFrom(c settings.Config) advancedPreferences {
-	return advancedPreferences{c.ExternalProxyOnly, int(c.RequestBytes() >> 20), int(c.WindowBytes() >> 20), int(c.CompactBytes() >> 20), c.EgressMode, c.EgressRoute, c.PoolEnabled}
-}
-func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
-	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
-	if c.rescue {
-		fail(errors.New("请先修复服务配置"))
-		return
+// Full links/configs are intentionally available to the authenticated local
+// owner. They never enter public static assets, status logs or diagnostics.
+func (c *control) poolStatus() map[string]any {
+	sources := []map[string]any{}
+	for _, raw := range c.config.ProxyURLs {
+		sources = append(sources, map[string]any{"id": "proxy:" + sourceID(raw), "kind": "节点链接", "value": raw})
 	}
+	for _, env := range c.config.ProxyEnvs {
+		sources = append(sources, map[string]any{"id": "env:" + sourceID(env), "kind": "环境变量 " + env, "value": os.Getenv(env)})
+	}
+	for _, source := range c.config.Subscriptions {
+		kind, value := "订阅", source.URL
+		if source.File != "" {
+			kind, value = "本地文件", source.File
+		} else if source.URLEnv != "" {
+			value = os.Getenv(source.URLEnv)
+		}
+		sources = append(sources, map[string]any{"id": "subscription:" + sourceID(source), "kind": kind, "value": value})
+	}
+	routes := []map[string]any{}
+	for _, original := range c.catalog {
+		row := map[string]any{}
+		for k, v := range original {
+			row[k] = v
+		}
+		row["selected"] = routeSelected(c.config, row["id"].(string))
+		routes = append(routes, row)
+	}
+	return map[string]any{"sources": sources, "routes": routes, "pinned_route": c.config.PinnedRoute, "selected_routes": c.config.SelectedRoutes}
+}
+
+func (c *control) replacePool(ctx context.Context, next settings.Config) error {
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	routes, err := proxyroute.Load(ctx, next)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			closeRoutes(routes)
+		}
+	}()
+	if err = validateSelection(routes, next); err != nil {
+		return err
+	}
+	c.pause()
+	defer c.resume()
+	if c.engine != nil && c.engine.Restricted() {
+		return errors.New("上游登录、权限或限流暂停尚未解除，不能通过更换节点清除暂停")
+	}
+	if err = c.persist(next); err != nil {
+		return err
+	}
+	c.stop()
+	c.config = next
+	c.start(routes)
+	committed = true
+	return nil
+}
+
+// Called while the normal management locks are held.
+func (c *control) poolAction(w http.ResponseWriter, r *http.Request, ctx context.Context) bool {
+	next := c.config
 	switch r.URL.Path {
-	case "/admin/api/advanced":
-		var v advancedPreferences
-		if err := decode(w, r, &v); err != nil {
-			fail(err)
-			return
-		}
-		if v.RequestLimitMiB == 0 || v.ZstdWindowMiB == 0 || v.CompactLimitMiB == 0 {
-			fail(errors.New("请完整填写上限，不能为零"))
-			return
-		}
-		next := c.config
-		next.ExternalProxyOnly = v.ExternalProxyOnly
-		next.RequestLimitMiB, next.ZstdWindowMiB, next.CompactLimitMiB = v.RequestLimitMiB, v.ZstdWindowMiB, v.CompactLimitMiB
-		next.EgressMode, next.EgressRoute, next.PoolEnabled = v.EgressMode, v.EgressRoute, v.PoolEnabled
-		if v.EgressMode != "fixed" {
-			next.EgressRoute = ""
-		}
-		// New egress settings must not retain the legacy single-route filter.
-		next.PinnedRoute = ""
-		if err := c.applyConfig(ctx, next); err != nil {
-			fail(err)
-			return
-		}
-		reply(w, 200, map[string]string{"message": "已备份并保存。新设置立即生效，旧 state 缓存已清空；池中已用/失败记录保留，不清除上游限流。"})
-	case "/admin/api/pool":
-		if c.engine == nil {
-			fail(errors.New("请先导入可用代理来源；配置未就绪"))
-			return
-		}
-		reply(w, 200, map[string]any{"routes": c.engine.PoolStatus(), "enabled": c.config.PoolEnabled})
-	case "/admin/api/pool/change":
+	case "/admin/api/pool/select":
 		var v struct {
-			IDs   []string `json:"ids"`
-			State string   `json:"state"`
+			IDs []string `json:"ids"`
 		}
 		if err := decode(w, r, &v); err != nil {
-			fail(err)
-			return
+			reply(w, 400, map[string]string{"error": err.Error()})
+			return true
 		}
-		if c.engine == nil || c.pool == nil {
-			fail(errors.New("代理池尚未加载"))
-			return
+		if len(v.IDs) == 0 {
+			reply(w, 400, map[string]string{"error": "至少勾选一个候选节点。需要停止采集请关闭注入"})
+			return true
 		}
-		if v.State != "available" && v.State != "disabled" {
-			fail(errors.New("只允许放回可用池或清理停用"))
-			return
+		known := map[string]bool{}
+		for _, row := range c.catalog {
+			known[row["id"].(string)] = true
 		}
-		if len(v.IDs) == 0 || len(v.IDs) > 256 {
-			fail(errors.New("请选择 1–256 个节点"))
-			return
-		}
-		c.pause()
-		defer c.resume()
-		if c.engine.Restricted() {
-			fail(errors.New("上游拒绝/限流未解除，不能通过回收节点继续尝试"))
-			return
-		}
-		valid := map[string]bool{}
-		for _, row := range c.engine.PoolStatus() {
-			valid[row.ID] = true
-		}
+		next.SelectedRoutes = nil
+		seen := map[string]bool{}
 		for _, id := range v.IDs {
-			if !valid[id] {
-				fail(errors.New("节点不存在，请刷新列表"))
-				return
+			if !known[id] {
+				reply(w, 400, map[string]string{"error": "节点列表已变化，请刷新后重新勾选"})
+				return true
+			}
+			if !seen[id] {
+				next.SelectedRoutes = append(next.SelectedRoutes, id)
+				seen[id] = true
 			}
 		}
-		if err := c.pool.Change(v.IDs, v.State, "manual", false); err != nil {
-			fail(err)
-			return
+		// Selecting candidates must not silently cancel an explicit fixed node.
+		// The card-level "取消固定" action is the only way to return to auto.
+		// Saving the candidate list enables the continuous proxy pool. Nodes are
+		// health observations and remain eligible after a probe; only a manual
+		// disable removes one from automatic collection.
+		next.PoolEnabled = true
+		next.EgressMode, next.EgressRoute = "state", ""
+		next.StateRefreshMode = "on_demand"
+	case "/admin/api/pool/remove-source":
+		var v struct {
+			ID string `json:"id"`
 		}
-		reply(w, 200, map[string]string{"message": "池状态已保存。只修改本地节点清单，不修改订阅提供方内容，也不会跳过采集冷却。清理是可恢复的停用，不删除订阅凭据。"})
+		if err := decode(w, r, &v); err != nil {
+			reply(w, 400, map[string]string{"error": err.Error()})
+			return true
+		}
+		found := false
+		next.ProxyURLs = nil
+		next.ProxyEnvs = nil
+		next.Subscriptions = nil
+		for _, value := range c.config.ProxyURLs {
+			if "proxy:"+sourceID(value) == v.ID {
+				found = true
+			} else {
+				next.ProxyURLs = append(next.ProxyURLs, value)
+			}
+		}
+		for _, value := range c.config.ProxyEnvs {
+			if "env:"+sourceID(value) == v.ID {
+				found = true
+			} else {
+				next.ProxyEnvs = append(next.ProxyEnvs, value)
+			}
+		}
+		for _, value := range c.config.Subscriptions {
+			if "subscription:"+sourceID(value) == v.ID {
+				found = true
+			} else {
+				next.Subscriptions = append(next.Subscriptions, value)
+			}
+		}
+		if !found {
+			reply(w, 400, map[string]string{"error": "来源已变化，请刷新列表"})
+			return true
+		}
+	case "/admin/api/pool/reload":
+		// Explicit subscription refresh; routine UI polling only reads the catalog.
+	default:
+		return false
 	}
+	if err := c.replacePool(ctx, next); err != nil {
+		reply(w, 400, map[string]string{"error": err.Error()})
+		return true
+	}
+	reply(w, 200, map[string]string{"message": "节点池已更新。固定时只用固定节点；取消固定后从已勾选节点自动轮换，某张 state 失效会立即切换备用 state。"})
+	return true
 }

@@ -69,8 +69,26 @@ func TestServiceLifecycleInIsolatedHomes(t *testing.T) {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode != 503 {
+		t.Fatalf("cold strict request should return promptly while background collects: %d", resp.StatusCode)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := Status(context.Background(), data)
+		if err == nil && strings.Contains(string(snapshot), `"usable":true`) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	req, _ = http.NewRequest("POST", "http://"+c.Listen+"/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-6-astra","input":"private prompt","stream":true}`))
+	req.Header.Set("Authorization", "Bearer synthetic-private-credential")
+	resp, err = client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Fatal(resp.StatusCode)
+		t.Fatalf("collected state not used: %d", resp.StatusCode)
 	}
 	status, err := Status(ctx, data)
 	if err != nil || !bytes.Contains(status, []byte(`"usable":true`)) {

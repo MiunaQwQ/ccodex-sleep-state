@@ -9,6 +9,8 @@ let noticeTimer;
 let recovery = null;
 let preferencesDirty = false;
 let timingDirty = false;
+let pool = null;
+let selectionDirty = false;
 const timingFields = {
   probe_timeout_seconds: "probe-timeout",
   probe_cooldown_seconds: "probe-cooldown",
@@ -22,7 +24,7 @@ function readTiming() {
 function timingSummary() {
   const t = readTiming();
   $("refresh-before").setCustomValidity(t.refresh_before_seconds >= t.state_ttl_seconds ? "提前刷新时间必须小于本地有效期" : "");
-  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}两轮至少相隔 ${t.probe_cooldown_seconds} 秒，每轮最多 ${t.max_probes_per_round} 次；state 签发约 ${t.state_ttl_seconds - t.refresh_before_seconds} 秒后进入刷新窗口。`;
+  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}成功后至少间隔 ${t.probe_cooldown_seconds} 秒；失败不冷却，每批 ${t.max_probes_per_round} 次后继续；state 签发约 ${t.state_ttl_seconds - t.refresh_before_seconds} 秒后进入刷新窗口。`;
 }
 function fillTiming(t) {
   if (!t) return;
@@ -90,7 +92,9 @@ async function action(fn) {
   }
 }
 const phases = {
-  ready: "已有符合规则的 state",
+  ready: "已有符合规则的 state · 正常使用",
+ search_queued: "等待采集槽位 · 将连续寻找",
+ upstream_paused: "上游报告繁忙 / 失败，暂时暂停",
   collecting: "正在采集，请稍等",
   waiting_for_state: "尚未采到合格 state",
   auth_blocked: "上游拒绝登录或权限",
@@ -176,12 +180,15 @@ async function refresh() {
   for (const [i, session] of (state.sessions || []).entries()) {
     let description =
       "会话 " + (i + 1) + " · " + (phases[session.phase] || session.phase);
+    if (session.upstream_pause_seconds) description += ` · 上游暂停 ${session.upstream_pause_seconds} 秒`;
     if (session.retry_after_seconds)
       description += " · 还需等待约 " + session.retry_after_seconds + " 秒";
     description += session.model ? " · " + session.model : "";
     description += session.expected_length
       ? " · 目标 " + session.expected_length
       : "";
+    if (typeof session.standby === "number")
+      description += ` · 备用 state ${session.standby} 张`;
     const row = textNode("div", "", "session");
     const detail = textNode("div", description);
     for (const note of [session.account_note, session.diagnostic_message])
@@ -222,7 +229,7 @@ async function refresh() {
         action(async () => {
           if (
             !confirm(
-              `重新采集会使用这个会话的账号和模型，本轮最多 ${state.max_probes_per_round || 6} 次短请求，会消耗额度。冷却和登录/限流暂停不会被跳过。继续？`,
+              `重新采集会使用这个会话的账号和模型，失败会在后台连续寻找直到成功，会消耗额度；登录失效或上游限流时暂停。继续？`,
             )
           )
             return;
@@ -238,9 +245,12 @@ async function refresh() {
     }
     $("sessions").append(row);
   }
+  renderNodeResults();
+ renderNodeLatency();
 }
 async function enter() {
   await refresh();
+  await loadPool();
   sessionStorage.setItem("sleep-state-control", token);
   $("token").value = "";
   $("login").hidden = true;
@@ -296,13 +306,13 @@ function sourceMode() {
   $("source-value-wrap").hidden = mode === "direct";
   $("source-label").textContent =
     {
-      proxy: "代理地址",
+      proxy: "节点链接（多个节点每行一个）",
       subscription: "订阅链接",
       file: "本机订阅文件的完整路径",
     }[mode] || "";
   $("source-value").placeholder =
     {
-      proxy: "socks5://127.0.0.1:7897",
+      proxy: "vless://…\nsocks5://…\nhttp://…",
       subscription: "https://… 或 http://127.0.0.1:端口/…",
       file: "C:\\Users\\你的用户名\\Downloads\\subscription.yaml",
     }[mode] || "";
@@ -311,7 +321,7 @@ function sourceMode() {
       ? "在这台电脑上读取你指定的普通文件，支持 YAML、URI 列表和 Base64 订阅。不会修改原文件。"
       : mode === "subscription"
         ? "链接可能含订阅密码，请勿截图分享。HTTP 只接受 127.0.0.1 等本机地址；远程链接必须使用 HTTPS。"
-        : "端口以你的代理软件为准。支持 http://、https://、socks5://。这里填地址，不是 PowerShell 命令。";
+        : "支持 VLESS、VMess、SS、Trojan、Hysteria2、TUIC、HTTP / SOCKS5 等。每行一个完整链接，不隐藏内容。";
 }
 $("source-mode").addEventListener("change", sourceMode);
 function sourceBody() {
@@ -321,6 +331,7 @@ function sourceBody() {
       .map((value) => value.trim())
       .filter(Boolean);
   return {
+    append: true,
     mode: $("source-mode").value,
     value: $("source-value").value.trim(),
     user_agent: $("user-agent").value.trim(),
@@ -348,58 +359,98 @@ $("source-form").addEventListener("submit", (event) => {
   action(async () => {
     if (
       !confirm(
-        "用这份设置替换现有出口来源？旧配置会备份，已经采集的 state 会清空。",
+        "添加这个来源并保留现有来源？旧配置会备份；重新载入后会按候选节点重新采集。",
       )
     )
       return;
     const value = await api("sources/apply", sourceBody());
     resultAt("source-result", value);
     $("source-value").value = "";
+    await loadPool();
     await refresh();
   });
 });
-$("load-routes").addEventListener("click", () =>
-  action(async () => {
-    const value = await api("routes", {});
-    $("routes-list").replaceChildren();
-    for (const route of value.routes) {
-      const row = textNode("div", "", "route");
-      const label = textNode("div", "");
-      label.append(
-        textNode(
-          "strong",
-          (route.label || route.id) +
-            (value.pinned_route === route.id ? " · 当前固定出口" : ""),
-        ),
-      );
-      label.append(textNode("div", route.id, "hint"));
-      row.append(label);
-      const actions = textNode("div", "", "actions");
-      const test = textNode("button", "测试连接", "secondary");
-      test.addEventListener("click", () =>
-        action(async () =>
-          resultAt("route-result", await api("routes/test", { id: route.id })),
-        ),
-      );
-      const pin = textNode("button", "固定此出口", "secondary");
-      pin.addEventListener("click", () =>
-        action(async () => {
-          resultAt("route-result", await api("routes/pin", { id: route.id }));
-          await refresh();
-        }),
-      );
-      actions.append(test, pin);
-      row.append(actions);
-      $("routes-list").append(row);
-    }
-  }),
-);
-$("auto-route").addEventListener("click", () =>
-  action(async () => {
-    resultAt("route-result", await api("routes/pin", { id: "" }));
-    await refresh();
-  }),
-);
+async function copyValue(value) {
+  try { await navigator.clipboard.writeText(value); notice("已复制完整链接 / 配置"); }
+  catch { notice("复制未获浏览器允许，请直接选中文本复制。"); }
+}
+function selectionSummary() {
+ const boxes = [...document.querySelectorAll("[data-candidate]")];
+ const selected = boxes.filter(box => box.checked).length;
+ $("selection-summary").textContent = `${selectionDirty ? "尚未保存 · " : "已保存 · "}${selected} / ${boxes.length} 个候选节点。保存勾选启用连续轮换：失败后继续下一个，全部失败则继续下一轮。`;
+}
+async function loadPool() {
+ pool = await api("pool");
+ selectionDirty = false;
+ $("source-list").replaceChildren();
+ for (const source of pool.sources || []) {
+  const card = textNode("div", "", "pool-source");
+  card.append(textNode("strong",source.kind));
+  card.append(textNode("pre",source.value,"full-connection"));
+  const copy=textNode("button","复制完整来源","secondary");
+  copy.addEventListener("click",()=>copyValue(source.value));
+  const remove=textNode("button","移除此来源","quiet");
+  remove.addEventListener("click",()=>action(async()=>{
+   if (!confirm("移除此来源？如果它包含唯一选中节点，请先保存其它候选节点。")) return;
+   notice((await api("pool/remove-source",{id:source.id})).message);
+   await loadPool();await refresh();
+  }));
+  card.append(copy,remove);$("source-list").append(card);
+ }
+ if (!pool.sources?.length) $("source-list").append(textNode("p","尚无第三方来源。可以在上方追加节点或订阅。","hint"));
+ $("routes-list").replaceChildren();
+ for (const route of pool.routes || []) {
+  const card=textNode("div","","card node-card");card.dataset.nodeCard=route.id;
+  const label=textNode("label","","node-heading");
+  const checkbox=document.createElement("input");checkbox.type="checkbox";
+  checkbox.dataset.candidate=route.id;checkbox.checked=route.selected;
+  checkbox.addEventListener("change",()=>{selectionDirty=true;selectionSummary();});
+  label.append(checkbox,textNode("strong",`${route.label || route.id} · ${route.protocol}`));card.append(label);
+  const connection=route.connection || "直连（使用系统路由）";
+  card.append(textNode("pre",connection,"full-connection"));
+ const latency=textNode("p","尚未测试延迟","hint");latency.dataset.nodeLatency=route.id;card.append(latency);
+  const results=textNode("div","","node-results");results.dataset.nodeResults=route.id;card.append(results);
+  const actions=textNode("div","","actions");
+  const copy=textNode("button","复制完整链接 / 配置","secondary");copy.addEventListener("click",()=>copyValue(connection));
+  const test=textNode("button","测试连接","secondary");test.addEventListener("click",()=>action(async()=>{notice((await api("pool/test",{ids:[route.id],timeout_seconds:Number($("node-test-timeout").value)})).message);await refresh();}));
+  const pinned=pool.pinned_route===route.id;
+  const pin=textNode("button",pinned?"取消固定":"固定此节点",pinned?"quiet":"secondary");
+  pin.addEventListener("click",()=>action(async()=>{notice((await api("routes/pin",{id:pinned?"":route.id})).message);await loadPool();await refresh();}));
+  actions.append(copy,test,pin);card.append(actions);$("routes-list").append(card);
+ }
+ selectionSummary();renderNodeResults();renderNodeLatency();
+}
+const nodeResults = {accepted:"符合目标",shape_mismatch:"非目标 state",network_failed:"连接失败 / 超时",incomplete_response:"回复未完整结束",missing_state_header:"缺少 state",invalid_state_envelope:"state 格式异常",state_time_rejected:"state 时间异常",upstream_rejected:"上游拒绝",model_capacity:"模型繁忙",response_failed:"上游失败",upstream_rate_limited:"上游限流"};
+function renderNodeResults() {
+ for (const element of document.querySelectorAll("[data-node-results]")) {
+  element.replaceChildren();let found=false;
+  for (const [index,session] of (state?.sessions || []).entries()) {
+   const record=(session.nodes || []).find(node=>node.route===element.dataset.nodeResults);
+   if (!record) continue;found=true;
+   const active=session.active_route===record.route ? " · 当前使用" : "";
+   element.append(textNode("p",`会话 ${index+1} · ${session.model}${active} · ${nodeResults[record.result] || record.result}${record.length ? ` · 返回 ${record.length} / 目标 ${record.expected_length}` : ""}`,record.result==="accepted" ? "node-good" : "node-pending"));
+   element.append(textNode("p",`${new Date(record.at).toLocaleTimeString()} · ${record.source==="probe" ? "主动采集" : "正常回复"} · HTTP ${record.http_status || "未收到响应"} · 累计观察 ${record.attempts} 次，符合 ${record.matches} 次`,"hint"));
+  }
+  if (!found) element.append(textNode("p","本次运行尚无该节点的模型采集记录","hint"));
+ }
+}
+$("load-routes").addEventListener("click",()=>action(async()=>{
+ if (selectionDirty && !confirm("刷新会撤销未保存的勾选，继续？")) return;
+ await loadPool();
+}));
+$("auto-route").addEventListener("click",()=>{
+ document.querySelectorAll("[data-candidate]").forEach(box=>box.checked=true);
+ selectionDirty=true;selectionSummary();
+});
+$("save-selection").addEventListener("click",()=>action(async()=>{
+ const ids=[...document.querySelectorAll("[data-candidate]:checked")].map(box=>box.dataset.candidate);
+ notice((await api("pool/select",{ids})).message);
+ await loadPool();await refresh();
+}));
+$("reload-pool").addEventListener("click",()=>action(async()=>{
+ if (!confirm("重新下载订阅并载入节点？现有 state 会清空；已保存的勾选会保留。")) return;
+ notice((await api("pool/reload",{})).message);await loadPool();await refresh();
+}));
 if (launchTicket)
   action(async () => {
     const value = await api("launch", { ticket: launchTicket });
@@ -410,7 +461,7 @@ else if (token) action(enter);
 setInterval(() => {
   if (token && !busy && !document.hidden)
     refresh().catch((error) => notice(error.message));
-}, 10000);
+}, 2000);
 
 $("preferences-form").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -565,4 +616,33 @@ $("timing-form").addEventListener("submit", (event) => {
     $("timing-result").textContent = result.message;
     await refresh();
   });
+});
+
+function renderNodeLatency() {
+ const tests=state?.node_tests;
+ $("node-test-progress").textContent=tests ? `${tests.running ? "正在测试" : "测试任务已结束"} · ${tests.completed} / ${tests.total}；勾选更改后需点“保存勾选”。` : "尚未开始";
+ for (const element of document.querySelectorAll("[data-node-latency]")) {
+  const result=tests?.results?.[element.dataset.nodeLatency];
+  element.textContent=result ? `${result.message}${result.reachable ? ` · ${result.duration_ms} ms · HTTP ${result.status}` : ""}${result.at && !result.at.startsWith("0001") ? ` · ${new Date(result.at).toLocaleTimeString()}` : ""}` : "尚未测试延迟";
+  element.className=result?.selectable ? "node-good" : "hint";
+ }
+}
+async function testNodes(onlySelected) {
+ const ids=onlySelected ? [...document.querySelectorAll("[data-candidate]:checked")].map(box=>box.dataset.candidate) : [];
+ if (onlySelected && !ids.length) throw new Error("请先勾选需要测试的节点");
+ notice((await api("pool/test",{ids,timeout_seconds:Number($("node-test-timeout").value)})).message);await refresh();
+}
+$("test-all-nodes").addEventListener("click",()=>action(()=>testNodes(false)));
+$("test-selected-nodes").addEventListener("click",()=>action(()=>testNodes(true)));
+$("stop-node-tests").addEventListener("click",()=>action(async()=>{notice((await api("pool/test-stop",{})).message);await refresh();}));
+$("select-reachable").addEventListener("click",()=>{
+ if (state?.node_tests?.running) {notice("请等待测试结束，或先停止测试");return;}
+ const results=state?.node_tests?.results || {};
+ document.querySelectorAll("[data-candidate]").forEach(box=>box.checked=results[box.dataset.candidate]?.selectable===true);
+ selectionDirty=true;selectionSummary();
+});
+$("sort-latency").addEventListener("click",()=>{
+ const results=state?.node_tests?.results || {};
+ const score=card=>{const r=results[card.dataset.nodeCard];return r?.selectable ? r.duration_ms : Infinity;};
+ [...document.querySelectorAll("[data-node-card]")].sort((a,b)=>score(a)-score(b)).forEach(card=>$("routes-list").append(card));
 });

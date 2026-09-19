@@ -52,6 +52,10 @@ func (c *control) applyConfig(ctx context.Context, next settings.Config) error {
 	if err != nil {
 		return err
 	}
+	if err = validateSelection(routes, next); err != nil {
+		closeRoutes(routes)
+		return err
+	}
 	published := false
 	defer func() {
 		if !published {

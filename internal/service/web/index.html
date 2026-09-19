@@ -42,8 +42,8 @@
         <button data-page="overview" class="active">开始使用</button
         ><button data-page="configuration">连接设置</button
         ><button data-page="sources">订阅与代理</button
-        ><button data-page="routes">路由</button
-        ><button data-page="pool">代理池</button><button data-page="help">遇到问题</button>
+        ><button data-page="routes">节点池</button
+        ><button data-page="pool">节点状态</button><button data-page="help">遇到问题</button>
       </nav>
       <main>
         <section data-view="overview">
@@ -188,15 +188,15 @@
             <form id="timing-form">
               <div class="settings-grid">
                 <div><label for="probe-timeout">单次探测超时（秒）</label><input id="probe-timeout" type="number" min="1" max="60" step="1" required /><small>1–60 秒；不是正常回复的超时。</small></div>
-                <div><label for="probe-cooldown">两轮采集最短间隔（秒）</label><input id="probe-cooldown" type="number" min="30" max="3600" step="1" required /><small>30–3600 秒；上游要求等待更久时，以更久为准。</small></div>
+                <div><label for="probe-cooldown">成功后最短采集间隔（秒）</label><input id="probe-cooldown" type="number" min="30" max="3600" step="1" required /><small>只在成功后生效；312、超时、连接失败后不冷却。</small></div>
                 <div><label for="state-ttl">本地 state 有效期（秒）</label><input id="state-ttl" type="number" min="120" max="3600" step="1" required /><small>120–3600 秒，从 state 签发时间计算；最后 30 秒不再接纳新请求。</small></div>
                 <div><label for="refresh-before">到期前多久刷新（秒）</label><input id="refresh-before" type="number" min="30" max="3599" step="1" required /><small>至少 30 秒，必须小于有效期；不是每隔这么久刷新。</small></div>
-                <div><label for="max-probes">每轮最多探测次数</label><input id="max-probes" type="number" min="1" max="20" step="1" required /><small>1–20 次；每次模型探测可能消耗额度。</small></div>
+                <div><label for="max-probes">每个调度批次探测次数</label><input id="max-probes" type="number" min="1" max="20" step="1" required /><small>1–20 次；失败立即进入下一批，不限制总尝试次数。</small></div>
               </div>
               <p id="timing-summary" class="hint" aria-live="polite"></p>
               <div class="actions">
                 <button type="button" id="timing-defaults" class="secondary">填入默认值</button>
-                <button type="button" id="timing-low-frequency" class="secondary">低频采集预设</button>
+                <button type="button" id="timing-low-frequency" class="secondary">延长成功后间隔</button>
                 <button type="button" id="timing-cancel" class="quiet">撤销未保存修改</button>
                 <button type="submit">保存采集设置</button>
               </div>
@@ -218,10 +218,10 @@
               <label for="egress-route">固定节点（先读取代理池）</label><select id="egress-route"><option value="">请先读取</option></select>
               <button type="button" id="load-egress" class="secondary">读取节点，不探测</button>
               <p class="hint">“自定义 IP”是选择你有权使用的代理端点，不是任意伪造公网 IP。采集节点与转发节点不同，不保证底层公网 IP 不同；节点名也不证明国家或家宽。跨出口使用 state 属实验功能。</p>
-              <label><input id="pool-enabled" type="checkbox" /> 用过的节点移入已用/失败清单，不自动循环复用</label>
+              <label><input id="pool-enabled" type="checkbox" /> 启用代理池自动轮换（固定节点时始终只用固定节点）</label>
               <label><input id="external-only" type="checkbox" /> 外部代理模式：只接入用户自己的 HTTP/SOCKS5 端点</label>
               <p class="hint">外部代理模式会拒绝内嵌隧道协议节点；它不改变你使用网络的合规义务。开启前先在代理客户端加载订阅。</p>
-              <button type="button" id="pool-preset" class="secondary">填入独立随机＋用后移出</button>
+              <button type="button" id="pool-preset" class="secondary">填入代理池自动轮换</button>
               <button type="submit">备份并保存高级设置</button>
               <p id="advanced-result" role="status"></p>
             </form>
@@ -312,15 +312,14 @@
         </section>
         <section data-view="sources" hidden>
           <p class="eyebrow">订阅与代理</p>
-          <h1>有代理软件就填地址，有链接就导入。</h1>
+          <h1>添加自己的节点和订阅。</h1>
           <p class="lead">
-            本地已经开着 Clash 一类工具，就填它的 HTTP 或 SOCKS5
-            地址。没有，也可以直接导入订阅。
+            直接导入 VLESS 等节点或第三方订阅，由本工具独立选用。也支持本地 HTTP / SOCKS5 入口；不会切换小火箭的节点。
           </p>
           <form id="source-form" class="card">
             <label for="source-mode">连接方式</label
             ><select id="source-mode">
-              <option value="proxy">本地 / HTTP / SOCKS5 代理</option>
+              <option value="proxy">节点链接（VLESS / VMess / SS / Trojan / HTTP / SOCKS5 等）</option>
               <option value="subscription">
                 订阅链接（支持本地 HTTP 订阅）
               </option>
@@ -329,13 +328,7 @@
             </select>
             <div id="source-value-wrap">
               <label id="source-label" for="source-value">代理地址</label
-              ><input
-                id="source-value"
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="socks5://127.0.0.1:7897"
-              />
+              ><textarea id="source-value" rows="4" autocomplete="off" spellcheck="false" placeholder="vless://…（多个节点每行一个）"></textarea>
               <p id="source-hint" class="hint">
                 端口以你的代理软件为准。此处填写的是地址，不是 PowerShell 命令。
               </p>
@@ -359,10 +352,10 @@
             <div class="actions">
               <button type="button" id="test-source" class="secondary">
                 先测试能否读取</button
-              ><button type="submit">保存并应用</button>
+              ><button type="submit">保存来源</button>
             </div>
             <p class="hint">
-              保存会替换本服务现有出口来源，并留下配置备份；不会修改你的代理软件、系统代理或订阅原文件。
+              默认追加并保留原来源。节点链接在本机面板完整显示，可直接复制。保存后到节点池勾选参与采集的节点。
             </p>
           </form>
           <div id="source-result" class="result" hidden></div>
@@ -373,37 +366,40 @@
               <input id="subscription-txt" type="file" accept=".txt,text/plain" />
               <label for="subscription-lines">手动输入／粘贴订阅链接（一行一个，含凭据请勿截图）</label><textarea id="subscription-lines" rows="5" required spellcheck="false"></textarea>
               <label><input id="subscription-append" type="checkbox" checked /> 追加到现有来源（不勾选则替换）</label>
-              <label><input id="subscription-enable-pool" type="checkbox" checked /> 导入后启用随机出口＋用后移出（追加时保留已选固定出口）</label>
-              <p class="hint">随机独立出口配合注入至少需要两个节点；已用/失败的不会自动回池。只想导入、不改变当前策略，请取消这个勾选。</p>
+              <label><input id="subscription-enable-pool" type="checkbox" /> 导入后加入代理池并自动轮换（追加时保留固定节点）</label>
+              <p class="hint">固定节点会一直使用该节点；取消固定后从已勾选节点自动寻找。节点失败只记录本次结果，稍后仍可自动复测。</p>
               <button type="button" id="test-pool-import" class="secondary">先检查所有订阅</button><button type="submit">备份并导入代理池</button>
               <p id="pool-import-result" role="status"></p>
             </form>
             <p class="hint">仅导入你有权使用的来源。项目不提供订阅、节点、跨境线路或代购服务，不修改系统代理/TUN。节点不是经过验证的唯一公网 IP。</p>
           </section>
+ <div class="card"><h2>已添加的来源</h2><div id="source-list" class="stack"></div></div>
         </section>
         <section data-view="routes" hidden>
           <p class="eyebrow">路由</p>
-          <h1>知道请求往哪走。</h1>
+          <h1>勾选候选，自动找到目标。</h1>
           <p class="lead">
-            这里是旧版兼容路由操作；独立随机出口、固定实际出口和节点回收请使用「连接设置」与「代理池」。旧版固定会同时限制采集和转发。
+            勾选后加入代理池；固定节点会一直使用它，取消固定后自动轮换。state 以主用＋多张备用牌保存，一张失效立即切换下一张；失败节点只记录健康结果，不会永久丢出池。
           </p>
           <div class="actions">
-            <button id="load-routes">读取路由列表</button
-            ><button id="auto-route" class="secondary">恢复自动选择</button>
+            <button id="load-routes">刷新节点列表</button
+            ><button id="auto-route" class="secondary">全选候选</button>
           </div>
           <p class="hint">
-            读取列表会重新获取订阅，但不调用模型。连接测试不带登录信息，也不消耗模型生成额度。
+            刷新列表只读取已加载节点。更新订阅按钮才重新下载来源。保存勾选会启用代理池和连续采集；节点卡片上的“固定此节点”可切换固定/自动模式。手动停用的节点仍需在“节点状态”放回。关闭注入可停止额外采集。
           </p>
-          <div id="routes-list" class="stack"></div>
+          <div class="actions"><button id="save-selection">保存勾选</button><button id="reload-pool" class="secondary">更新订阅并重新载入</button></div><p id="selection-summary" class="hint"></p>
+ <div class="card"><h2>批量延迟测试</h2><p class="hint">测量经过节点到上游的响应耗时，包含连接与 TLS；不是 ICMP ping，也不代表可以取得 292。</p><div class="actions"><button id="test-all-nodes">测试全部节点</button><button id="test-selected-nodes" class="secondary">测试已勾选</button><button id="stop-node-tests" class="quiet">停止测试</button></div><label for="node-test-timeout">单节点超时（秒）</label><input id="node-test-timeout" type="number" value="6" min="1" max="30" /><div class="actions"><button id="select-reachable" class="secondary">仅勾选测试通过的节点</button><button id="sort-latency" class="secondary">按延迟从低到高排序</button></div><p id="node-test-progress" role="status" class="hint">尚未开始</p></div>
+ <div id="routes-list" class="stack"></div>
           <div id="route-result" class="result" hidden></div>
         </section>
         <section data-view="pool" hidden>
           <p class="eyebrow">节点生命周期</p><h1>可用、已用、失败，分开管理。</h1>
-          <p>记录按节点配置标识，不按国家名或公网 IP。已用/失败节点不会自动回池；重新导入相同节点仍保留记录。清理是停用，可再次手动放回，不修改订阅地址。</p>
-          <button id="reload-pool">刷新本地代理池</button>
+          <p>记录按节点配置标识，不按国家名或公网 IP。代理池会保留失败观察并自动复测；只有手动停用的节点不会自动使用，可再次手动放回，不修改订阅地址。</p>
+          <button id="reload-lifecycle-pool">刷新节点状态</button>
           <label for="pool-filter">查看清单</label><select id="pool-filter"><option value="available">可用池</option><option value="used">已用清单</option><option value="failed">失败清单</option><option value="disabled">已清理（停用）</option></select>
           <label for="pool-session">单节点采集使用的现有会话</label><select id="pool-session"><option value="">先在 Codex 发一条消息，再刷新</option></select>
-          <p class="hint">单节点重试只探测选中节点一次，失败后可在冷却结束再点。不读取登录文件、不跳过 401/403/429、不自动重放正式请求。主用仍可用时，成功的新值可作为备用。</p>
+          <p class="hint">单节点重试只探测选中节点一次；失败不增加冷却，后台按当前策略继续寻找。不读取登录文件、不跳过 401/403/429、不自动重放正式请求。主用仍可用时，成功的新值可作为备用。</p>
           <div class="actions"><button id="pool-select-all" class="secondary">全选当前清单</button><button id="pool-recycle" class="secondary">选中项放回可用池</button><button id="pool-disable" class="secondary">清理选中项</button></div>
           <p id="pool-summary" class="hint"></p><div id="pool-list" class="stack"></div><p id="pool-result" role="status"></p>
         </section>

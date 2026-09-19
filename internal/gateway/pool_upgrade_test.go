@@ -35,12 +35,12 @@ func TestConfiguredLargeRequestAccepted(t *testing.T) {
 		t.Fatal(called)
 	}
 }
-func TestShapeFailurePromotesStandbyWithoutReplay(t *testing.T) {
+func TestShapeChangePreservesAnswerAndPromotesStandbyWithoutReplay(t *testing.T) {
 	calls := 0
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		w.Header().Set(turnstate.Header, fakeToken(11, 3))
-		w.Write([]byte("blocked-body"))
+		w.Write([]byte("completed-answer"))
 	}))
 	r := request(generation, "fixture-promote-key")
 	s, err := e.borrow(r.Header)
@@ -54,7 +54,7 @@ func TestShapeFailurePromotesStandbyWithoutReplay(t *testing.T) {
 	release(s)
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, r)
-	if w.Code != 503 || bytes.Contains(w.Body.Bytes(), []byte("blocked-body")) || calls != 1 {
+	if w.Code != 200 || !bytes.Contains(w.Body.Bytes(), []byte("completed-answer")) || calls != 1 {
 		t.Fatal(w.Code, calls, w.Body.String())
 	}
 	active, ok := s.state.Acquire(time.Now())

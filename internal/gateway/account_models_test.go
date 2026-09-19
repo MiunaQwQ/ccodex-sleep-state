@@ -392,7 +392,7 @@ func TestStateFallbackNeverBypassesAccountRejection(t *testing.T) {
 	}
 }
 
-func TestManualRetryRespectsCooldownAndKeepsOpaqueSessionID(t *testing.T) {
+func TestFailedCollectionHasNoCooldownAndKeepsOpaqueSessionID(t *testing.T) {
 	var calls atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); complete(w, fakeToken(11, 31)) }))
 	w := httptest.NewRecorder()
@@ -404,20 +404,17 @@ func TestManualRetryRespectsCooldownAndKeepsOpaqueSessionID(t *testing.T) {
 	if s == nil || s.id == "" {
 		t.Fatal("no opaque session id")
 	}
-	if err := e.RetryState(context.Background(), s.id); err == nil || !strings.Contains(err.Error(), "冷却") {
-		t.Fatalf("cooldown error=%v", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatal("manual retry skipped cooldown")
-	}
-	s.mu.Lock()
-	s.nextProbe = time.Now().Add(-time.Second)
-	s.mu.Unlock()
 	if err := e.RetryState(context.Background(), s.id); err == nil {
 		t.Fatal("bad state became accepted")
 	}
 	if calls.Load() != 2 {
-		t.Fatalf("retry count=%d", calls.Load())
+		t.Fatal("failed round incorrectly cooled down")
+	}
+	s.mu.Lock()
+	cooling := time.Now().Before(s.nextProbe)
+	s.mu.Unlock()
+	if cooling {
+		t.Fatal("failed collection set success cooldown")
 	}
 	status, _ := json.Marshal(e.Status())
 	if !strings.Contains(string(status), `"id":"`+s.id+`"`) {
@@ -499,7 +496,7 @@ func TestBackgroundSelectionPinsCredentialGuardAcrossIdleBoundary(t *testing.T) 
 	if len(work) != 1 || work[0] != s {
 		t.Fatal("active worker session not selected")
 	}
-	defer release(s)
+	defer releaseWork(s)
 	// Selection used the instant immediately before expiration. By the time a
 	// new model borrows the same credentials, the idle boundary has passed.
 	other, err := e.borrow(headers, "gpt-5.6-sol")

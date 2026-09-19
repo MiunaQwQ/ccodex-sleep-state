@@ -43,6 +43,7 @@ type Config struct {
 	UpstreamKind         string   `json:"upstream_kind,omitempty"`
 	CodexProfile         string   `json:"codex_profile,omitempty"`
 	InjectionDisabled    bool     `json:"injection_disabled,omitempty"`
+	SelectedRoutes       []string `json:"selected_routes,omitempty"`
 	PinnedRoute          string   `json:"pinned_route,omitempty"`
 	Listen               string   `json:"listen"`
 	Upstream             string   `json:"upstream"`

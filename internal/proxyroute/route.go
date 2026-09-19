@@ -33,6 +33,7 @@ type Route struct {
 	StableID string
 	// DisplayName and Protocol are for the authenticated local panel, never logs.
 	DisplayName string
+	Connection  string
 	Protocol    string
 	Transport   *http.Transport
 	close       func() error
@@ -65,7 +66,9 @@ func Build(node map[string]any, index int) (Route, error) {
 	}
 	copyNode := make(map[string]any, len(node))
 	for k, v := range node {
-		copyNode[k] = v
+		if k != "__source_uri" {
+			copyNode[k] = v
+		}
 	}
 	stableID, err := nodeIdentity(copyNode)
 	if err != nil {
@@ -89,7 +92,12 @@ func Build(node map[string]any, index int) (Route, error) {
 		return conn, nil
 	}
 	protocol, _ := node["type"].(string)
-	return Route{ID: id, StableID: stableID, DisplayName: nodeDisplayName(node, protocol), Protocol: protocol, Transport: tr, close: proxy.Close}, nil
+	connection, _ := node["__source_uri"].(string)
+	if connection == "" {
+		encoded, _ := json.Marshal(map[string]any{"proxies": []any{node}})
+		connection = string(encoded)
+	}
+	return Route{Connection: connection, ID: id, StableID: stableID, DisplayName: nodeDisplayName(node, protocol), Protocol: protocol, Transport: tr, close: proxy.Close}, nil
 }
 
 // Labels come only from a subscription's explicit display name, never from
@@ -124,7 +132,7 @@ func nodeDisplayName(node map[string]any, protocol string) string {
 func nodeIdentity(node map[string]any) (string, error) {
 	canonical := make(map[string]any, len(node))
 	for key, value := range node {
-		if key != "name" {
+		if key != "name" && key != "__source_uri" {
 			canonical[key] = value
 		}
 	}

@@ -466,3 +466,12 @@ details[open] > summary {
     padding: 23px;
   }
 }
+
+/* Personal node pool: full connection strings remain selectable and readable. */
+textarea { width:100%; box-sizing:border-box; padding:12px; border:1px solid var(--line,#d8dedb); border-radius:10px; font:inherit; resize:vertical; }
+.full-connection { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-all; max-height:240px; overflow:auto; padding:12px; background:rgba(128,128,128,.07); border-radius:8px; font-size:12px; user-select:text; }
+.node-heading { display:flex; align-items:center; gap:12px; }
+.node-heading input[type=checkbox] { width:20px; height:20px; margin:0; flex:none; }
+.node-good { color:#207448; } .node-pending { color:#996020; }
+.pool-source { padding:12px 0; border-bottom:1px solid #deded8; }
+.pool-source button { margin-right:8px; }

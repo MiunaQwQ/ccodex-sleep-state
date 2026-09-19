@@ -1,6 +1,7 @@
 package turnstate
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -11,36 +12,96 @@ type Snapshot struct {
 	Version uint64
 }
 
-// Store has one publisher. Response observations cannot mutate active state.
-// Snapshot values are immutable; a request never rereads them halfway through.
+// PersistedSnapshot is the private, opaque form used by the local backup.
+// RouteID is stable across reloads; the in-memory route index is not.
+type PersistedSnapshot struct {
+	Token   string    `json:"token"`
+	RouteID string    `json:"route_id"`
+	Issued  time.Time `json:"issued"`
+}
+
+// Persisted is intentionally limited to state candidates. Credentials and
+// request bodies never enter the backup file.
+type Persisted struct {
+	Active  *PersistedSnapshot  `json:"active,omitempty"`
+	Standby []PersistedSnapshot `json:"standby,omitempty"`
+	SavedAt time.Time           `json:"saved_at"`
+}
+
+// Store publishes one active state and keeps a bounded set of standby states.
+// A response observation can invalidate only the snapshot used by that
+// request; the next valid standby is promoted immediately.
 type Store struct {
 	holdActive    bool
 	mu            sync.Mutex
 	policy        Policy
 	active, ready Snapshot
+	standby       []Snapshot
 	version       uint64
 	strikes       int
 	candidates    uint64
 }
 
+const maxStandby = 16
+
 func New(p Policy) *Store { return &Store{policy: p} }
+
 func (s *Store) Acquire(now time.Time) (Snapshot, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.promote(now)
 	return s.active, s.policy.Accept(s.active.Token, now)
 }
+
 func (s *Store) promote(now time.Time) {
-	a, r := s.active, s.ready
-	if s.policy.Accept(r.Token, now) && r.Token.Fingerprint != a.Token.Fingerprint &&
-		(!s.policy.Accept(a.Token, now) || s.strikes >= 2 || (!s.holdActive && now.Add(s.policy.Refresh).After(a.Token.Issued.Add(s.policy.TTL)) && r.Token.Issued.After(a.Token.Issued))) {
-		s.version++
-		r.Version = s.version
-		s.active = r
+	s.prune(now)
+	a := s.active
+	activeOK := s.policy.Accept(a.Token, now)
+	if len(s.standby) == 0 {
 		s.ready = Snapshot{}
+		return
+	}
+	candidate := s.standby[0]
+	if activeOK && candidate.Token.Fingerprint == a.Token.Fingerprint {
+		s.standby = s.standby[1:]
+		s.promote(now)
+		return
+	}
+	shouldPromote := !activeOK || s.strikes >= 2 || (!s.holdActive && now.Add(s.policy.Refresh).After(a.Token.Issued.Add(s.policy.TTL)) && candidate.Token.Issued.After(a.Token.Issued))
+	if shouldPromote {
+		s.version++
+		candidate.Version = s.version
+		s.active = candidate
+		s.standby = s.standby[1:]
 		s.strikes = 0
 	}
+	if len(s.standby) > 0 {
+		s.ready = s.standby[0]
+	} else {
+		s.ready = Snapshot{}
+	}
 }
+
+func (s *Store) prune(now time.Time) {
+	if s.active.Token.Value != "" && !s.policy.Accept(s.active.Token, now) {
+		s.active = Snapshot{}
+	}
+	kept := s.standby[:0]
+	seen := map[string]bool{}
+	for _, candidate := range s.standby {
+		if candidate.Token.Value == "" || !s.policy.Accept(candidate.Token, now) || seen[candidate.Token.Fingerprint] || candidate.Token.Fingerprint == s.active.Token.Fingerprint {
+			continue
+		}
+		seen[candidate.Token.Fingerprint] = true
+		kept = append(kept, candidate)
+	}
+	s.standby = kept
+	s.ready = Snapshot{}
+	if len(s.standby) > 0 {
+		s.ready = s.standby[0]
+	}
+}
+
 func (s *Store) Offer(t Token, route int, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -48,21 +109,36 @@ func (s *Store) Offer(t Token, route int, now time.Time) bool {
 	if !s.policy.Accept(t, now) {
 		return false
 	}
-	if s.active.Token.Fingerprint == t.Fingerprint {
+	if t.Fingerprint == s.active.Token.Fingerprint {
 		return true
 	}
+	for _, candidate := range s.standby {
+		if candidate.Token.Fingerprint == t.Fingerprint {
+			return true
+		}
+	}
+	candidate := Snapshot{Token: t, Route: route}
 	if !s.policy.Accept(s.active.Token, now) {
 		s.version++
-		s.active = Snapshot{t, route, s.version}
+		candidate.Version = s.version
+		s.active = candidate
 		s.strikes = 0
+		s.promote(now)
 		return true
 	}
-	if s.ready.Token.Value == "" || !t.Issued.Before(s.ready.Token.Issued) {
-		s.ready = Snapshot{Token: t, Route: route}
-	}
+	s.standby = append(s.standby, candidate)
+	s.sortStandby()
 	s.promote(now)
 	return true
 }
+
+func (s *Store) sortStandby() {
+	sort.SliceStable(s.standby, func(i, j int) bool { return s.standby[i].Token.Issued.After(s.standby[j].Token.Issued) })
+	if len(s.standby) > maxStandby {
+		s.standby = s.standby[:maxStandby]
+	}
+}
+
 func (s *Store) Observe(value string, used Snapshot, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,6 +157,7 @@ func (s *Store) Observe(value string, used Snapshot, now time.Time) bool {
 	}
 	return suspect
 }
+
 func (s *Store) NeedsRefresh(now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,6 +170,7 @@ type Status struct {
 	Version          uint64 `json:"version"`
 	RemainingSeconds int    `json:"remaining_seconds"`
 	Ready            bool   `json:"ready"`
+	Standby          int    `json:"standby"`
 	Strikes          int    `json:"strikes"`
 	Candidates       uint64 `json:"observations"`
 }
@@ -100,15 +178,73 @@ type Status struct {
 func (s *Store) Status(now time.Time) Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.promote(now)
 	left := int(s.active.Token.Issued.Add(s.policy.TTL).Sub(now).Seconds())
 	if left < 0 {
 		left = 0
 	}
-	return Status{s.policy.Accept(s.active.Token, now), s.active.Version, left, s.policy.Accept(s.ready.Token, now), s.strikes, s.candidates}
+	return Status{s.policy.Accept(s.active.Token, now), s.active.Version, left, s.policy.Accept(s.ready.Token, now), len(s.standby), s.strikes, s.candidates}
+}
+
+// Export returns only currently acceptable candidates, suitable for the
+// permission-0600 local backup. The route ID is supplied by the gateway.
+func (s *Store) Export(now time.Time, routeID func(int) string) Persisted {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.promote(now)
+	result := Persisted{SavedAt: now.UTC()}
+	if s.policy.Accept(s.active.Token, now) {
+		result.Active = &PersistedSnapshot{Token: s.active.Token.Value, RouteID: routeID(s.active.Route), Issued: s.active.Token.Issued}
+	}
+	for _, candidate := range s.standby {
+		if s.policy.Accept(candidate.Token, now) {
+			result.Standby = append(result.Standby, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued})
+		}
+	}
+	return result
+}
+
+// Restore imports a previously accepted backup. Unknown routes are skipped;
+// no state is attached to a different egress by accident.
+func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int, bool)) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.active, s.ready, s.standby = Snapshot{}, Snapshot{}, nil
+	add := func(raw PersistedSnapshot) (Snapshot, bool) {
+		route, ok := routeIndex(raw.RouteID)
+		if !ok {
+			return Snapshot{}, false
+		}
+		t, err := Parse(raw.Token)
+		if err != nil || !s.policy.Accept(t, now) {
+			return Snapshot{}, false
+		}
+		return Snapshot{Token: t, Route: route}, true
+	}
+	if p.Active != nil {
+		if active, ok := add(*p.Active); ok {
+			s.version++
+			active.Version = s.version
+			s.active = active
+		}
+	}
+	for _, raw := range p.Standby {
+		if candidate, ok := add(raw); ok && candidate.Token.Fingerprint != s.active.Token.Fingerprint {
+			s.standby = append(s.standby, candidate)
+		}
+	}
+	s.sortStandby()
+	s.promote(now)
+	return len(s.standby) + func() int {
+		if s.active.Token.Value != "" {
+			return 1
+		}
+		return 0
+	}()
 }
 
 // RejectAndPromote changes only future admissions. In-flight snapshots remain
-// immutable and a stale response cannot invalidate a newer active state.
+// immutable and a stale failure cannot invalidate a newer active state.
 func (s *Store) RejectAndPromote(used Snapshot, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,3 +258,17 @@ func (s *Store) RejectAndPromote(used Snapshot, now time.Time) bool {
 }
 
 func (s *Store) HoldActive(hold bool) { s.mu.Lock(); defer s.mu.Unlock(); s.holdActive = hold }
+
+// Invalidate only the snapshot actually used by a failing request. Late
+// responses must not invalidate a newer active state.
+func (s *Store) Invalidate(used Snapshot, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if used.Version != s.active.Version || used.Token.Fingerprint != s.active.Token.Fingerprint {
+		return false
+	}
+	s.active = Snapshot{}
+	s.strikes = 0
+	s.promote(now)
+	return true
+}

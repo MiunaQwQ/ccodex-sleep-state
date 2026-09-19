@@ -117,8 +117,13 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot, usable := s.state.Acquire(time.Now())
 	if inject && !usable {
-		e.refresh(r.Context(), s, true)
+		if e.running.Load() {
+			e.signal()
+		} else {
+			e.refresh(r.Context(), s, true)
+		}
 		snapshot, usable = s.state.Acquire(time.Now())
+		e.signal()
 	}
 	if rejectRequest(w, s) {
 		return
@@ -166,7 +171,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "pool_node_disabled", "所选出口已停用，请在代理池手动放回或选择其他出口")
 		return
 	}
-	if e.config.PoolEnabled && generation {
+	if e.config.PoolEnabled && generation && e.config.EgressMode == "random" && e.config.PinnedRoute == "" {
 		// Reserve before dispatch so concurrent requests cannot consume one random
 		// node twice. A fixed user exit is explicitly reusable.
 		allowUsed := e.config.EgressMode != "random"
@@ -219,11 +224,29 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if bridgeCompact && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return e.bridgeCompactResponse(resp, s, route)
 			}
-			if inject && resp.StatusCode >= 200 && resp.StatusCode < 300 && s.state.Observe(resp.Header.Get(turnstate.Header), snapshot, time.Now()) {
-				// Never replay a generation request: it may already have run upstream.
-				resp.Body.Close()
-				s.state.RejectAndPromote(snapshot, time.Now())
-				return errShape
+			if inject && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				value := resp.Header.Get(turnstate.Header)
+				if value != "" {
+					token, parseErr := turnstate.Parse(value)
+					if s.state.Observe(value, snapshot, time.Now()) {
+						result := "shape_mismatch"
+						if parseErr != nil {
+							result = "invalid_state_envelope"
+						} else if token.Blocks == s.policy.Blocks {
+							result = "state_time_rejected"
+						}
+						e.recordNode(s, route, result, resp.StatusCode, token.Blocks, 0, "response")
+						e.invalidate(s, snapshot, route, result, token.Blocks)
+						// Keep the successful answer. Recollection is a separate service job;
+						// the submitted generation is never replayed through another node.
+					} else {
+						e.recordNode(s, route, "accepted", resp.StatusCode, token.Blocks, 0, "response")
+					}
+				}
+			}
+			if inject && resp.StatusCode >= 500 {
+				e.recordNode(s, route, "upstream_rejected", resp.StatusCode, 0, 0, "response")
+				e.invalidate(s, snapshot, route, "upstream_rejected", 0)
 			}
 			return nil
 		},
@@ -241,6 +264,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				fail(w, 503, "state_shape_changed", "响应头 state 不符合规则，正文已拦截；已尝试切换备用 state，供下一次请求使用。本次可能已计费，不自动重放，请查看主备状态。")
 				return
 			}
+			if inject && r.Context().Err() == nil {
+				e.recordNode(s, route, "network_failed", 0, 0, 0, "response")
+				e.invalidate(s, snapshot, route, "network_failed", 0)
+			}
 			fail(w, 502, "upstream_unavailable", "Upstream connection failed. Request was not replayed.")
 		},
 	}
@@ -250,7 +277,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "compaction", compact)
 	}()
 	proxy.ServeHTTP(tracked, r)
-	if e.config.PoolEnabled && generation {
+	if e.config.PoolEnabled && generation && e.config.EgressMode == "random" && e.config.PinnedRoute == "" {
 		st, reason := "used", "request_dispatched"
 		if tracked.status >= 400 {
 			st, reason = "failed", "request_failed"

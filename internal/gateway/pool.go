@@ -26,8 +26,8 @@ func (e *Engine) selectEgress(harvest int, hasState bool) (int, error) {
 		for i, r := range e.routes {
 			if r.ID == e.config.EgressRoute {
 				state := e.pool.Get(r.ID).State
-				if state == "disabled" || (e.config.PoolEnabled && state == "failed") {
-					return 0, errors.New("固定出口已失败/停用，请在代理池手动回收或选择另一个出口")
+				if state == "disabled" {
+					return 0, errors.New("固定出口已停用，请先取消停用或选择其它节点")
 				}
 				return i, nil
 			}

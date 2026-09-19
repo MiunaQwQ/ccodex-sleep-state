@@ -131,7 +131,7 @@ func TestQuotaFailureStopsProbeRoundAndCooldown(t *testing.T) {
 		})
 	}
 }
-func TestShapeRejectionNeverReplaysGeneration(t *testing.T) {
+func TestShapeChangePreservesAnswerAndNeverReplaysGeneration(t *testing.T) {
 	var generated atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(turnstate.Header) == "" {
@@ -143,7 +143,7 @@ func TestShapeRejectionNeverReplaysGeneration(t *testing.T) {
 	}))
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "synthetic-account-token"))
-	if w.Code != 503 || generated.Load() != 1 || !strings.Contains(w.Body.String(), "state_shape_changed") {
+	if w.Code != 200 || generated.Load() != 1 || !strings.Contains(w.Body.String(), "response.completed") {
 		t.Fatal("shape policy or no-replay guarantee failed")
 	}
 }

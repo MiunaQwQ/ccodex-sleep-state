@@ -18,12 +18,14 @@ import (
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 	"github.com/gylive/ccodex-sleep-state/internal/routepool"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
+	"github.com/gylive/ccodex-sleep-state/internal/turnstate"
 )
 
 // control owns a whole route generation. Reconfiguration never mutates routes
 // under an active request, and never discards an account's upstream rejection.
 type control struct {
 	pool                  *routepool.Store
+	backup                *turnstate.BackupStore
 	targetURL, targetKind string
 	authMode, codexHome   string
 
@@ -35,6 +37,8 @@ type control struct {
 	configure, managed     bool
 	rescue                 bool
 	setupError, routeError string
+	tests                  *nodeTester
+	catalog                []map[string]any
 	engine                 *gateway.Engine
 	cancel                 context.CancelFunc
 	done                   chan struct{}
@@ -52,26 +56,41 @@ func (c *control) start(routes []proxyroute.Route) {
 			return
 		}
 	}
-
-	selected := routes
-	if c.config.PinnedRoute != "" {
-		selected = nil
-		for _, r := range routes {
-			if r.ID == c.config.PinnedRoute {
-				selected = append(selected, r)
-			} else {
-				r.Close()
-			}
+	if c.tests == nil {
+		c.tests = &nodeTester{}
+	}
+	c.catalog = routeList(routes)
+	selected := make([]proxyroute.Route, 0, len(routes))
+	for _, route := range routes {
+		if routeSelected(c.config, route.ID) {
+			selected = append(selected, route)
+		} else {
+			route.Close()
 		}
 	}
+	if c.config.PinnedRoute == "" && len(c.config.SelectedRoutes) > 0 {
+		ordered := make([]proxyroute.Route, 0, len(selected))
+		byID := map[string]proxyroute.Route{}
+		for _, route := range selected {
+			byID[route.ID] = route
+		}
+		for _, id := range c.config.SelectedRoutes {
+			if route, ok := byID[id]; ok {
+				ordered = append(ordered, route)
+				delete(byID, id)
+			}
+		}
+		selected = ordered
+	}
 	if len(selected) == 0 {
-		c.routeError = "固定出口已不存在，请在路由页切回自动选择。"
+		c.routeError = "所选出口已不存在，请在节点池重新选择节点。"
 		return
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	c.cancel, c.done = cancel, make(chan struct{})
 	effective := c.effective()
 	c.engine = gateway.New(effective, selected, c.log, c.pool)
+	c.engine.SetStateBackup(c.backup)
 	engine, done := c.engine, c.done
 	go func() { defer close(done); engine.Run(ctx) }()
 	c.routeError = ""
@@ -95,6 +114,9 @@ func (c *control) resume() {
 	go func() { defer close(done); engine.Run(ctx) }()
 }
 func (c *control) stop() {
+	if c.tests != nil {
+		c.tests.stop()
+	}
 	c.pause()
 	if c.engine != nil {
 		c.engine.Close()
@@ -250,6 +272,9 @@ func (c *control) status() map[string]any {
 	result["timing"] = timingFrom(c.config)
 	result["timing_defaults"] = timingFrom(settings.Default())
 	result["traffic"] = c.history.snapshot()
+	if c.tests != nil {
+		result["node_tests"] = c.tests.snapshot()
+	}
 	result["injection_effective"] = !c.effective().InjectionDisabled && c.engine != nil && result["configured_codex"] == true && result["config_error"] == "" && c.routeError == ""
 	if c.effective().IsRelay() {
 		result["injection_reason"] = "当前为 API / 中转转发，不采集或注入官方 state。"

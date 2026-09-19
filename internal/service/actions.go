@@ -42,12 +42,14 @@ type sourceRequest struct {
 
 func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 	next := c.config
+	next.Direct = false
 	if !v.Append {
 		next.Direct = false
 		next.ProxyURLs = []string{}
 		next.ProxyEnvs = []string{}
 		next.Subscriptions = []settings.Source{}
 		next.PinnedRoute = ""
+		next.SelectedRoutes = nil
 		next.EgressRoute = ""
 		if next.EgressMode == "fixed" {
 			next.EgressMode = "random"
@@ -57,20 +59,31 @@ func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 	next.ProxyURLs = append([]string(nil), next.ProxyURLs...)
 	if v.EnablePool {
 		next.PoolEnabled = true
-		next.PinnedRoute = ""
-		if next.EgressMode != "fixed" {
-			next.EgressMode = "random"
-		}
+		next.EgressMode = "state"
 	}
 	source := settings.Source{UserAgent: v.UserAgent, ExcludeKeywords: v.Exclude, IncludeProtocols: v.Protocols}
 	switch v.Mode {
 	case "direct":
 		next.Direct = true
 	case "proxy":
-		next.ProxyURLs = append(next.ProxyURLs, v.Value)
+		for _, raw := range strings.Split(v.Value, "\n") {
+			raw = strings.TrimSpace(raw)
+			if raw != "" {
+				found := false
+				for _, old := range next.ProxyURLs {
+					found = found || old == raw
+				}
+				if !found {
+					next.ProxyURLs = append(next.ProxyURLs, raw)
+				}
+			}
+		}
+		if len(next.ProxyURLs) == 0 {
+			return next, errors.New("请填写至少一个节点链接")
+		}
 	case "subscription":
 		source.URL = v.Value
-		next.Subscriptions = append(next.Subscriptions, source)
+		next.Subscriptions = appendSource(next.Subscriptions, source)
 	case "subscription-list":
 		seen := map[string]bool{}
 		for _, existing := range next.Subscriptions {
@@ -95,7 +108,7 @@ func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 		}
 	case "file":
 		source.File = v.Value
-		next.Subscriptions = append(next.Subscriptions, source)
+		next.Subscriptions = appendSource(next.Subscriptions, source)
 	default:
 		return next, errors.New("请选择直连、本地代理、订阅链接或本地订阅文件")
 	}
@@ -109,12 +122,18 @@ func closeRoutes(routes []proxyroute.Route) {
 func routeList(routes []proxyroute.Route) []map[string]any {
 	result := make([]map[string]any, 0, len(routes))
 	for _, r := range routes {
-		result = append(result, map[string]any{"id": r.ID, "label": r.DisplayName, "protocol": r.Protocol})
+		result = append(result, map[string]any{"id": r.ID, "label": r.DisplayName, "protocol": r.Protocol, "connection": r.Connection})
 	}
 	return result
 }
 
 func (c *control) api(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/admin/api/pool" && r.Method == "GET" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		reply(w, 200, c.poolStatus())
+		return
+	}
 	if r.URL.Path == "/admin/api/environment-check" && r.Method == "GET" {
 		reply(w, 200, c.environmentCheck())
 		return
@@ -133,6 +152,16 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.action.Unlock()
+	if r.URL.Path == "/admin/api/pool/test" || r.URL.Path == "/admin/api/pool/test-stop" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		if c.tests == nil {
+			reply(w, 409, map[string]string{"error": "节点池尚未准备好"})
+			return
+		}
+		c.nodeTestAction(w, r)
+		return
+	}
 	if !c.mu.TryLock() {
 		reply(w, 409, map[string]string{"error": "Codex 正在处理请求，等这次回复结束后再操作"})
 		return
@@ -141,6 +170,9 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
+	if c.poolAction(w, r, ctx) {
+		return
+	}
 	switch r.URL.Path {
 	case "/admin/api/advanced", "/admin/api/pool", "/admin/api/pool/change":
 		c.poolAPI(w, r, ctx)
@@ -479,6 +511,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			reply(w, 409, map[string]string{"error": "上游登录、权限或限流拦截尚未解除。不能通过换出口继续请求。"})
 			return
 		}
+		if err = validateSelection(routes, next); err != nil {
+			closeRoutes(routes)
+			fail(err)
+			return
+		}
 		if err = c.persist(next); err != nil {
 			closeRoutes(routes)
 			fail(err)
@@ -491,7 +528,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("配置已保存，但固定出口已失效。请在路由页恢复自动选择。"))
 			return
 		}
-		reply(w, 200, map[string]string{"message": "出口已应用，不需要重启服务。旧 state 已清空，下次 Codex 请求会按新出口重新采集。"})
+		reply(w, 200, map[string]string{"message": "节点来源已保存。请到节点池勾选候选节点；下次模型请求将按新出口采集。"})
 	case "/admin/api/routes", "/admin/api/routes/test", "/admin/api/routes/pin":
 		var v struct {
 			ID string `json:"id"`
@@ -551,6 +588,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		// This legacy action pins the whole route set. Mixing it with an
 		// independent random/fixed exit would leave no matching candidate.
 		next.EgressMode, next.EgressRoute = "state", ""
+		if err = validateSelection(routes, next); err != nil {
+			closeRoutes(routes)
+			fail(err)
+			return
+		}
 		if err = c.persist(next); err != nil {
 			closeRoutes(routes)
 			fail(err)
@@ -563,7 +605,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("配置已保存，但固定出口已失效。请在路由页恢复自动选择。"))
 			return
 		}
-		reply(w, 200, map[string]string{"message": "路由已切换为采集同出口模式，旧 state 已清空。要分开采集与正式出口，请使用连接设置里的独立出口设置。"})
+		if v.ID == "" {
+			reply(w, 200, map[string]string{"message": "已取消固定。后续从已勾选代理池自动轮换；仍有效且属于现有节点的 state 备份会继续可用。"})
+		} else {
+			reply(w, 200, map[string]string{"message": "已固定该节点。采集、正式请求和失效后的 state 切换都只使用这个节点；其它节点不会自动顶上。"})
+		}
 	case "/admin/api/recover":
 		if !c.configure {
 			fail(errors.New("当前使用 --no-config 只读启动。请停止服务后使用 setup 启动，再接管配置；本次没有修改任何文件。"))
