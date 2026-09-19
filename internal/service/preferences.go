@@ -24,12 +24,6 @@ func timingFrom(c settings.Config) timingPreferences {
 // applyPreferences runs under the management lock, after active replies drain.
 // A new route generation is published only after both configuration writes work.
 func (c *control) applyPreferences(ctx context.Context, model, accountMode, fallback string, timing ...timingPreferences) error {
-	if c.managed {
-		if err := c.checkManaged(); err != nil {
-			return errors.New("Codex 连接或认证已改变，请先检查与修复配置，再保存模型设置")
-		}
-	}
-	previousTarget, previousKind, previousAuth, previousHome := c.targetURL, c.targetKind, c.authMode, c.codexHome
 	next := c.config
 	next.Model, next.AccountMode, next.StateFallback = model, accountMode, fallback
 	if len(timing) > 0 {
@@ -37,6 +31,15 @@ func (c *control) applyPreferences(ctx context.Context, model, accountMode, fall
 		next.ProbeSeconds, next.RefreshSeconds, next.CooldownSeconds = t.ProbeSeconds, t.RefreshSeconds, t.CooldownSeconds
 		next.MaxProbes, next.TTLSeconds = t.MaxProbes, t.TTLSeconds
 	}
+	return c.applyConfig(ctx, next)
+}
+func (c *control) applyConfig(ctx context.Context, next settings.Config) error {
+	if c.managed {
+		if err := c.checkManaged(); err != nil {
+			return errors.New("Codex 连接或认证已改变，请先检查与修复配置，再保存模型设置")
+		}
+	}
+	previousTarget, previousKind, previousAuth, previousHome := c.targetURL, c.targetKind, c.authMode, c.codexHome
 	if err := next.Validate(); err != nil {
 		return err
 	}
@@ -57,10 +60,13 @@ func (c *control) applyPreferences(ctx context.Context, model, accountMode, fall
 	}()
 	// A subscription may have removed the pinned route since the previous load.
 	// Do not report a successful save while replacing a working engine with none.
-	if next.PinnedRoute != "" {
+	for _, selectedID := range []string{next.PinnedRoute, next.EgressRoute} {
+		if selectedID == "" {
+			continue
+		}
 		found := false
 		for _, route := range routes {
-			if route.ID == next.PinnedRoute {
+			if route.ID == selectedID {
 				found = true
 				break
 			}

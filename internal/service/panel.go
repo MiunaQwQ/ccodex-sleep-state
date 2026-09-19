@@ -82,6 +82,10 @@ func controlHandler(host, token string, c *control, tickets ...*browserTicket) h
 			switch r.URL.Path {
 			case "/admin/":
 				file, mime = "index.html", "text/html; charset=utf-8"
+			case "/admin/upgrade.js":
+				file, mime = "upgrade.js", "text/javascript; charset=utf-8"
+			case "/admin/environment_check.js":
+				file, mime = "environment_check.js", "text/javascript; charset=utf-8"
 			case "/admin/app.js":
 				file, mime = "app.js", "text/javascript; charset=utf-8"
 			case "/admin/style.css":

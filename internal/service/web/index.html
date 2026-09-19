@@ -6,6 +6,8 @@
     <title>Sleep State · 本地管理</title>
     <link rel="stylesheet" href="/admin/style.css" />
     <script src="/admin/app.js" defer></script>
+    <script src="/admin/upgrade.js" defer></script>
+    <script src="/admin/environment_check.js" defer></script>
   </head>
   <body>
     <header>
@@ -41,11 +43,12 @@
         ><button data-page="configuration">连接设置</button
         ><button data-page="sources">订阅与代理</button
         ><button data-page="routes">路由</button
-        ><button data-page="help">遇到问题</button>
+        ><button data-page="pool">代理池</button><button data-page="help">遇到问题</button>
       </nav>
       <main>
         <section data-view="overview">
           <p class="eyebrow">运行状态</p>
+          <div class="quick-start"><div><strong id="next-step-title">先连接服务</strong><p id="next-step-help">读取状态后会告诉你下一步。</p></div><button id="next-step-action">去处理</button></div>
           <h1 id="headline">正在读取状态…</h1>
           <p class="lead">
             先让 Codex 接上，再决定要不要注入。配置和故障都留在这个窗口处理。
@@ -84,6 +87,10 @@
             </button>
           </div>
           <div id="warnings"></div>
+          <section class="card">
+            <div class="row"><div><h2>不确定哪里没配好？先检查一下。</h2><p>只检查本地，不改配置、不读取登录凭据，也不发送模型请求。</p></div><button id="environment-check">一键检测环境配置</button></div>
+            <div id="environment-results" aria-live="polite" hidden></div>
+          </section>
           <section id="rescue-card" class="card" hidden>
             <h2>服务配置损坏，但不用手改 JSON</h2>
             <p>
@@ -112,6 +119,13 @@
               关闭注入不是绕过官方限流。401、403、429
               的停止规则仍然生效；正在进行的回复不会被打断。
             </p>
+          </section>
+          <section class="card">
+            <h2>拿到可用值后，固定用还是备一份？</h2>
+            <p>固定主用更少探测；主备模式提前准备下一份。两者都遵守到期和上游限流。</p>
+            <select id="state-policy"><option value="on_demand">拿到后固定使用 · 少探测</option><option value="standby">提前备好下一份 · 主用＋备用</option></select>
+            <button id="save-state-policy">就用这个方式（保留当前可用值）</button>
+            <p id="state-policy-result" role="status"></p>
           </section>
           <section class="card">
             <h2>请求与会话</h2>
@@ -190,6 +204,40 @@
               <p id="timing-result" class="result" role="status"></p>
             </form>
           </section>
+          <details class="card" id="advanced-details"><summary>高级设置（通常不用改）</summary>
+            <h2>请求上限与实际出口</h2>
+            <form id="advanced-form">
+              <div class="settings-grid">
+                <div><label for="request-limit">请求体上限（MiB）</label><input id="request-limit" type="number" min="16" max="128" required /></div>
+                <div><label for="window-limit">zstd 窗口上限（MiB）</label><input id="window-limit" type="number" min="16" max="128" required /></div>
+                <div><label for="compact-limit">压缩回复上限（MiB）</label><input id="compact-limit" type="number" min="16" max="128" required /></div>
+              </div>
+              <p class="hint">默认 64 MiB，最高 128 MiB。解决本地 413，不会提高上游限制。越大越占内存；最多 4 个大请求同时处理，其余等待。</p>
+              <label for="egress-mode">正常请求的出口</label>
+              <select id="egress-mode"><option value="state">兼容模式 · 使用采集 state 的节点</option><option value="random">独立随机 · 从可用池选择另一个节点</option><option value="fixed">用户固定 · 使用下面选定的节点</option></select>
+              <label for="egress-route">固定节点（先读取代理池）</label><select id="egress-route"><option value="">请先读取</option></select>
+              <button type="button" id="load-egress" class="secondary">读取节点，不探测</button>
+              <p class="hint">“自定义 IP”是选择你有权使用的代理端点，不是任意伪造公网 IP。采集节点与转发节点不同，不保证底层公网 IP 不同；节点名也不证明国家或家宽。跨出口使用 state 属实验功能。</p>
+              <label><input id="pool-enabled" type="checkbox" /> 用过的节点移入已用/失败清单，不自动循环复用</label>
+              <label><input id="external-only" type="checkbox" /> 外部代理模式：只接入用户自己的 HTTP/SOCKS5 端点</label>
+              <p class="hint">外部代理模式会拒绝内嵌隧道协议节点；它不改变你使用网络的合规义务。开启前先在代理客户端加载订阅。</p>
+              <button type="button" id="pool-preset" class="secondary">填入独立随机＋用后移出</button>
+              <button type="submit">备份并保存高级设置</button>
+              <p id="advanced-result" role="status"></p>
+            </form>
+          </details>
+          <section class="card">
+            <h2>中转站连接助手</h2>
+            <p>支持 Responses 兼容接口；只列出 Astra / Sol / Terra。中转按自己的 API key 转发，不强制采集 292，也不会凭 332 推断 Team 身份。</p>
+            <form id="relay-models-form">
+              <label for="relay-base">基础地址 / Responses 地址</label><input id="relay-base" type="password" autocomplete="off" placeholder="https://中转地址/v1" required />
+              <label for="relay-key">该中转的 API key（仅本次检测，不保存）</label><input id="relay-key" type="password" autocomplete="off" />
+              <button type="submit">读取可用模型，不生成内容</button>
+              <button type="button" id="repair-relay" class="secondary">只补全缺失的 base_url</button>
+              <p id="relay-result" role="status"></p>
+            </form>
+            <p class="hint">读模型只调用 /models；出现 404 可能是中转不支持该接口，不代表生成必定不可用。补全地址会保留其它配置并备份；已有地址或无法安全定位时拒绝覆盖。Key 仍需在 Codex/CCS 配好。</p>
+          </section>
           <section class="card">
             <h2>CCS / CC Switch 与中转站</h2>
             <p>
@@ -264,7 +312,7 @@
         </section>
         <section data-view="sources" hidden>
           <p class="eyebrow">订阅与代理</p>
-          <h1>选一种连接方式。</h1>
+          <h1>有代理软件就填地址，有链接就导入。</h1>
           <p class="lead">
             本地已经开着 Clash 一类工具，就填它的 HTTP 或 SOCKS5
             地址。没有，也可以直接导入订阅。
@@ -318,13 +366,26 @@
             </p>
           </form>
           <div id="source-result" class="result" hidden></div>
+          <section class="card">
+            <h2>多个订阅合成一个代理池</h2>
+            <p>可手动输入或粘贴订阅链接，每行一个；也可导入 TXT（UTF-8，最多 64 KiB）。最多 16 个来源、合并后最多 256 个节点；相同节点配置去重。任一来源失败时保留旧配置，不悄悄丢掉原池。</p>
+            <form id="pool-import-form">
+              <input id="subscription-txt" type="file" accept=".txt,text/plain" />
+              <label for="subscription-lines">手动输入／粘贴订阅链接（一行一个，含凭据请勿截图）</label><textarea id="subscription-lines" rows="5" required spellcheck="false"></textarea>
+              <label><input id="subscription-append" type="checkbox" checked /> 追加到现有来源（不勾选则替换）</label>
+              <label><input id="subscription-enable-pool" type="checkbox" checked /> 导入后启用随机出口＋用后移出（追加时保留已选固定出口）</label>
+              <p class="hint">随机独立出口配合注入至少需要两个节点；已用/失败的不会自动回池。只想导入、不改变当前策略，请取消这个勾选。</p>
+              <button type="button" id="test-pool-import" class="secondary">先检查所有订阅</button><button type="submit">备份并导入代理池</button>
+              <p id="pool-import-result" role="status"></p>
+            </form>
+            <p class="hint">仅导入你有权使用的来源。项目不提供订阅、节点、跨境线路或代购服务，不修改系统代理/TUN。节点不是经过验证的唯一公网 IP。</p>
+          </section>
         </section>
         <section data-view="routes" hidden>
           <p class="eyebrow">路由</p>
           <h1>知道请求往哪走。</h1>
           <p class="lead">
-            自动模式按顺序采集，state
-            和采集它的出口绑定。你也可以固定一个出口；切换后会重新采集，不会把旧票硬塞到新出口。
+            这里是旧版兼容路由操作；独立随机出口、固定实际出口和节点回收请使用「连接设置」与「代理池」。旧版固定会同时限制采集和转发。
           </p>
           <div class="actions">
             <button id="load-routes">读取路由列表</button
@@ -335,6 +396,16 @@
           </p>
           <div id="routes-list" class="stack"></div>
           <div id="route-result" class="result" hidden></div>
+        </section>
+        <section data-view="pool" hidden>
+          <p class="eyebrow">节点生命周期</p><h1>可用、已用、失败，分开管理。</h1>
+          <p>记录按节点配置标识，不按国家名或公网 IP。已用/失败节点不会自动回池；重新导入相同节点仍保留记录。清理是停用，可再次手动放回，不修改订阅地址。</p>
+          <button id="reload-pool">刷新本地代理池</button>
+          <label for="pool-filter">查看清单</label><select id="pool-filter"><option value="available">可用池</option><option value="used">已用清单</option><option value="failed">失败清单</option><option value="disabled">已清理（停用）</option></select>
+          <label for="pool-session">单节点采集使用的现有会话</label><select id="pool-session"><option value="">先在 Codex 发一条消息，再刷新</option></select>
+          <p class="hint">单节点重试只探测选中节点一次，失败后可在冷却结束再点。不读取登录文件、不跳过 401/403/429、不自动重放正式请求。主用仍可用时，成功的新值可作为备用。</p>
+          <div class="actions"><button id="pool-select-all" class="secondary">全选当前清单</button><button id="pool-recycle" class="secondary">选中项放回可用池</button><button id="pool-disable" class="secondary">清理选中项</button></div>
+          <p id="pool-summary" class="hint"></p><div id="pool-list" class="stack"></div><p id="pool-result" role="status"></p>
         </section>
         <section data-view="help" hidden>
           <p class="eyebrow">遇到问题</p>

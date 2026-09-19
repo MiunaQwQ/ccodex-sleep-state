@@ -60,3 +60,24 @@ func TestSubscriptionHeaderAndFilterValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestRefreshModeNewAndExistingDefaults(t *testing.T) {
+	if Default().StateRefreshMode != "on_demand" {
+		t.Fatal("new installs must hold active")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil || c.StateRefreshMode != "standby" {
+		t.Fatal(c.StateRefreshMode, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"state_refresh_mode":"on_demand"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err = Load(path)
+	if err != nil || c.StateRefreshMode != "on_demand" {
+		t.Fatal(c.StateRefreshMode, err)
+	}
+}

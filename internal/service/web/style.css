@@ -281,6 +281,7 @@ button:focus-visible {
   color: #62705f;
 }
 #notice {
+  pointer-events: none;
   position: fixed;
   bottom: 24px;
   left: 50%;

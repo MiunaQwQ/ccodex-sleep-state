@@ -120,6 +120,12 @@ macOS：
 
 macOS 对应 `./ccodex-sleep-state doctor`。不要发 `auth.json`、管理口令、完整订阅或整个数据目录。更多问题、修复与尚未验收项都记录在[问题清单](docs/issues-and-verification.md)，不会只留在聊天记录里。
 
+## v0.4.0：更简单的配置与可控代理池
+
+本版新增：**拿到可用值后固定使用**、多订阅代理池、手动粘贴/TXT 导入、已用/失败清单、单节点重试，以及独立出口与大请求设置。首页给出下一步操作，复杂参数留在高级设置里。
+
+现有版本不会自动升级。下载前请看[v0.4.0 发布说明](docs/release-v0.4.0.md)和[升级与回退指南](docs/upgrade-0.4.0-preview.md)，运行边界见[合规与风险说明](docs/compliance.md)。
+
 ## 用之前知道这些边界
 
 - 支持的模型是 **`gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`**，上游必须实际提供对应模型。工具不会替你开通权限，也不会悄悄换模型。
@@ -149,6 +155,13 @@ macOS 对应 `./ccodex-sleep-state doctor`。不要发 `auth.json`、管理口�
 |:---:|:---:|
 | <img src="docs/assets/wechat-personal.jpg" alt="作者个人微信二维码，扫码添加好友" width="280"> | <img src="docs/assets/qq-group.jpg" alt="QQ 群“此间大梦无边”二维码，群号 754842541" width="280"> |
 | 扫码添加作者个人微信；这是好友二维码，不是微信群入口。 | 扫码，或搜索群号 **754842541**。 |
+
+### 朋友的卡网 · RedeemAI
+
+<img src="docs/assets/redeemai-ad.jpg" alt="朋友的卡网 RedeemAI：AI 服务兑换及 Codex 额度相关商品，具体信息见卡网页面" width="640">
+
+朋友的卡网：[faka.redeemai.org](https://faka.redeemai.org)。友情展示，商品、价格及售后以卡网页面为准，图中的服务承诺未由本项目核验。本工具免费使用，无需购买；不代表 OpenAI 官方授权或背书。
+
 
 反馈时带上系统、Codex 版本、工具版本和错误提示就够了。**不要发账号凭据、完整订阅链接或未经检查的配置文件。**
 

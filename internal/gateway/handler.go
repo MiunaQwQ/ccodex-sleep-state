@@ -47,7 +47,15 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	model := e.config.SelectedModel()
 	if r.Method == http.MethodPost {
-		body, status, err := requestBody(r)
+		select {
+		case e.bodySlots <- struct{}{}:
+			defer func() { <-e.bodySlots }()
+		case <-r.Context().Done():
+			fail(w, 503, "local_request_capacity", "本机请求等待已取消；请求尚未转发")
+			return
+		}
+
+		body, status, err := requestBodyWithLimits(r, e.config.RequestBytes(), e.config.WindowBytes())
 		if err != nil {
 			code := "invalid_request_encoding"
 			if status == http.StatusUnsupportedMediaType {
@@ -77,7 +85,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if bridgeCompact {
-			body, err = bridgeCompactRequest(body)
+			body, err = bridgeCompactRequestLimit(body, e.config.RequestBytes())
 			if err != nil {
 				fail(w, 400, "invalid_compaction_request", err.Error())
 				return
@@ -144,6 +152,29 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if (inject || compact) && usable {
 		route = snapshot.Route
 	}
+	if e.config.EgressMode == "random" || e.config.EgressMode == "fixed" {
+		selected, err := e.selectEgress(snapshot.Route, (inject || compact) && usable)
+		if err != nil {
+			fail(w, 503, "egress_unavailable", err.Error())
+			return
+		}
+		route = selected
+	}
+	// Manual removal must apply even in legacy cycling mode and to compact/
+	// metadata requests, not just to new state probes.
+	if e.pool.Get(e.routes[route].ID).State == "disabled" {
+		fail(w, 503, "pool_node_disabled", "所选出口已停用，请在代理池手动放回或选择其他出口")
+		return
+	}
+	if e.config.PoolEnabled && generation {
+		// Reserve before dispatch so concurrent requests cannot consume one random
+		// node twice. A fixed user exit is explicitly reusable.
+		allowUsed := e.config.EgressMode != "random"
+		if err := e.pool.Claim(e.routes[route].ID, allowUsed); err != nil {
+			fail(w, 503, "pool_node_unavailable", err.Error())
+			return
+		}
+	}
 	target, _ := url.Parse(e.config.Upstream)
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -191,6 +222,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if inject && resp.StatusCode >= 200 && resp.StatusCode < 300 && s.state.Observe(resp.Header.Get(turnstate.Header), snapshot, time.Now()) {
 				// Never replay a generation request: it may already have run upstream.
 				resp.Body.Close()
+				s.state.RejectAndPromote(snapshot, time.Now())
 				return errShape
 			}
 			return nil
@@ -206,7 +238,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if errors.Is(err, errShape) {
-				fail(w, 503, "state_shape_changed", "Upstream state changed shape. Request was not replayed; check status before retrying.")
+				fail(w, 503, "state_shape_changed", "响应头 state 不符合规则，正文已拦截；已尝试切换备用 state，供下一次请求使用。本次可能已计费，不自动重放，请查看主备状态。")
 				return
 			}
 			fail(w, 502, "upstream_unavailable", "Upstream connection failed. Request was not replayed.")
@@ -218,6 +250,13 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "compaction", compact)
 	}()
 	proxy.ServeHTTP(tracked, r)
+	if e.config.PoolEnabled && generation {
+		st, reason := "used", "request_dispatched"
+		if tracked.status >= 400 {
+			st, reason = "failed", "request_failed"
+		}
+		_ = e.pool.Change([]string{e.routes[route].ID}, st, reason, false)
+	}
 }
 func rejectRequest(w http.ResponseWriter, s *session) bool {
 	status, seconds := s.rejection()

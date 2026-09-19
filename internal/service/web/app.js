@@ -70,7 +70,7 @@ async function action(fn) {
     });
     if (state && state.upstream_kind === "relay") $("toggle").disabled = true;
     document
-      .querySelectorAll("[data-retry]")
+      .querySelectorAll("[data-locked]")
       .forEach(
         (button) => (button.disabled = button.dataset.locked === "true"),
       );
@@ -105,6 +105,7 @@ function textNode(tag, text, className) {
 }
 async function refresh() {
   state = await api("status");
+ if(typeof renderUpgrade==="function") renderUpgrade(state);
   $("rescue-card").hidden = !state.rescue_mode;
   $("headline").textContent =
     state.config_error || state.route_error
@@ -157,7 +158,7 @@ async function refresh() {
     );
   }
   $("warnings").replaceChildren();
-  for (const message of [state.config_error, state.route_error])
+  for (const message of [state.config_error, state.route_error, state.pool_error])
     if (message) $("warnings").append(textNode("div", message, "warning"));
   $("sessions").replaceChildren();
   if (!state.sessions?.length)
@@ -251,6 +252,7 @@ $("login-form").addEventListener("submit", (event) => {
   action(async () => {
     token = $("token").value.trim();
     await enter();
+    clearTimeout(noticeTimer);$("notice").hidden=true;
   });
 });
 $("logout").addEventListener("click", () => {
