@@ -15,6 +15,7 @@ import (
 	"github.com/gylive/ccodex-sleep-state/internal/codexconfig"
 	"github.com/gylive/ccodex-sleep-state/internal/fsutil"
 	"github.com/gylive/ccodex-sleep-state/internal/gateway"
+	"github.com/gylive/ccodex-sleep-state/internal/netpath"
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 	"github.com/gylive/ccodex-sleep-state/internal/routepool"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
@@ -39,6 +40,7 @@ type control struct {
 	setupError, routeError string
 	tests                  *nodeTester
 	catalog                []map[string]any
+	nodePath               *netpath.Path
 	engine                 *gateway.Engine
 	cancel                 context.CancelFunc
 	done                   chan struct{}
@@ -60,6 +62,10 @@ func (c *control) start(routes []proxyroute.Route) {
 		c.tests = &nodeTester{}
 	}
 	c.catalog = routeList(routes)
+	c.nodePath = nil
+	if len(routes) > 0 {
+		c.nodePath = routes[0].NodePath
+	}
 	selected := make([]proxyroute.Route, 0, len(routes))
 	for _, route := range routes {
 		if routeSelected(c.config, route.ID) {
@@ -266,6 +272,12 @@ func (c *control) status() map[string]any {
 	result["state_fallback"] = c.config.StateFallback
 	result["state_refresh_mode"] = c.config.StateRefreshMode
 	result["advanced"] = advancedFrom(c.config)
+	result["node_network"] = netpath.Info{Mode: "system"}
+	if c.nodePath != nil {
+		result["node_network"] = c.nodePath.Info
+	} else if c.config.NodeNetworkMode == "physical" {
+		result["node_network"] = netpath.Info{Mode: "physical", Interface: c.config.NodeInterface}
+	}
 	if c.pool != nil && c.pool.Err() != nil {
 		result["pool_error"] = c.pool.Err().Error()
 	}

@@ -8,6 +8,8 @@ import (
 )
 
 type advancedPreferences struct {
+	NodeNetworkMode   string `json:"node_network_mode"`
+	NodeInterface     string `json:"node_interface"`
 	ExternalProxyOnly bool   `json:"external_proxy_only"`
 	RequestLimitMiB   int    `json:"request_limit_mib"`
 	ZstdWindowMiB     int    `json:"zstd_window_mib"`
@@ -18,7 +20,7 @@ type advancedPreferences struct {
 }
 
 func advancedFrom(c settings.Config) advancedPreferences {
-	return advancedPreferences{c.ExternalProxyOnly, int(c.RequestBytes() >> 20), int(c.WindowBytes() >> 20), int(c.CompactBytes() >> 20), c.EgressMode, c.EgressRoute, c.PoolEnabled}
+	return advancedPreferences{c.NodeNetworkMode, c.NodeInterface, c.ExternalProxyOnly, int(c.RequestBytes() >> 20), int(c.WindowBytes() >> 20), int(c.CompactBytes() >> 20), c.EgressMode, c.EgressRoute, c.PoolEnabled}
 }
 func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
 	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
@@ -38,6 +40,10 @@ func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			return
 		}
 		next := c.config
+		// Older clients omit these fields; preserve an existing physical path.
+		if v.NodeNetworkMode != "" {
+			next.NodeNetworkMode, next.NodeInterface = v.NodeNetworkMode, v.NodeInterface
+		}
 		next.ExternalProxyOnly = v.ExternalProxyOnly
 		next.RequestLimitMiB, next.ZstdWindowMiB, next.CompactLimitMiB = v.RequestLimitMiB, v.ZstdWindowMiB, v.CompactLimitMiB
 		next.EgressMode, next.EgressRoute, next.PoolEnabled = v.EgressMode, v.EgressRoute, v.PoolEnabled

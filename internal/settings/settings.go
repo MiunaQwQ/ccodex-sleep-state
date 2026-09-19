@@ -27,6 +27,8 @@ type Source struct {
 }
 
 type Config struct {
+	NodeNetworkMode   string `json:"node_network_mode,omitempty"`
+	NodeInterface     string `json:"node_interface,omitempty"`
 	ExternalProxyOnly bool   `json:"external_proxy_only,omitempty"`
 	StateRefreshMode  string `json:"state_refresh_mode,omitempty"`
 	RequestLimitMiB   int    `json:"request_limit_mib,omitempty"`
@@ -89,6 +91,12 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.NodeNetworkMode != "" && c.NodeNetworkMode != "system" && c.NodeNetworkMode != "physical" {
+		return errors.New("节点网络必须为 system 或 physical")
+	}
+	if c.NodeInterface != "" && (len(c.NodeInterface) > 32 || strings.ContainsAny(c.NodeInterface, " /\\\t\r\n") || !strings.HasPrefix(c.NodeInterface, "en")) {
+		return errors.New("物理网卡名称无效；留空可自动选择")
+	}
 	if c.StateRefreshMode != "" && c.StateRefreshMode != "standby" && c.StateRefreshMode != "on_demand" {
 		return errors.New("state 策略必须为 standby 或 on_demand")
 	}

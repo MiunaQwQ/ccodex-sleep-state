@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gylive/ccodex-sleep-state/internal/netpath"
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 )
 
@@ -51,7 +52,7 @@ func (t *nodeTester) stop() {
 		t.cancel()
 	}
 }
-func (t *nodeTester) start(parent context.Context, catalog []map[string]any, target string, timeout time.Duration) error {
+func (t *nodeTester) start(parent context.Context, catalog []map[string]any, target string, timeout time.Duration, paths ...*netpath.Path) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.state.Running {
@@ -84,7 +85,7 @@ func (t *nodeTester) start(parent context.Context, catalog []map[string]any, tar
 					t.mu.Lock()
 					t.state.Results[id] = nodeTestResult{ID: id, Phase: "testing", Message: "正在连接上游"}
 					t.mu.Unlock()
-					result := testNode(ctx, row, target, timeout)
+					result := testNode(ctx, row, target, timeout, paths...)
 					t.mu.Lock()
 					if t.generation == generation {
 						t.state.Results[id] = result
@@ -109,7 +110,7 @@ func (t *nodeTester) start(parent context.Context, catalog []map[string]any, tar
 	return nil
 }
 
-func testNode(parent context.Context, row map[string]any, target string, timeout time.Duration) nodeTestResult {
+func testNode(parent context.Context, row map[string]any, target string, timeout time.Duration, paths ...*netpath.Path) nodeTestResult {
 	result := nodeTestResult{ID: row["id"].(string), Phase: "failed", At: time.Now().UTC()}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -122,12 +123,15 @@ func testNode(parent context.Context, row map[string]any, target string, timeout
 	var err error
 	if result.ID == "direct" {
 		route = proxyroute.Route{Transport: &http.Transport{Proxy: nil}}
+		if len(paths) > 0 && paths[0] != nil {
+			route.Transport.DialContext = paths[0].DialContext
+		}
 	} else {
 		connection, _ := row["connection"].(string)
 		var nodes []map[string]any
 		nodes, err = proxyroute.Parse([]byte(connection))
 		if err == nil && len(nodes) == 1 {
-			route, err = proxyroute.Build(nodes[0], 0)
+			route, err = proxyroute.Build(nodes[0], 0, paths...)
 		} else {
 			err = errors.New("invalid cached node")
 		}
@@ -211,7 +215,7 @@ func (c *control) nodeTestAction(w http.ResponseWriter, r *http.Request) {
 		reply(w, 400, map[string]string{"error": "没有找到待测试节点，请刷新列表"})
 		return
 	}
-	if err := c.tests.start(c.ctx, catalog, strings.TrimRight(c.effective().Upstream, "/")+"/models", time.Duration(v.TimeoutSeconds)*time.Second); err != nil {
+	if err := c.tests.start(c.ctx, catalog, strings.TrimRight(c.effective().Upstream, "/")+"/models", time.Duration(v.TimeoutSeconds)*time.Second, c.nodePath); err != nil {
 		reply(w, 409, map[string]string{"error": err.Error()})
 		return
 	}

@@ -17,10 +17,14 @@ function renderUpgrade(s){
   $("egress-mode").value=s.advanced.egress_mode||"state";
   $("pool-enabled").checked=s.advanced.pool_enabled;
   $("external-only").checked=s.advanced.external_proxy_only;
+  $("node-network-mode").value=s.advanced.node_network_mode||"system";
+  $("node-interface").value=s.advanced.node_interface||"";
   const id=s.advanced.egress_route;
   if(id && ![...$("egress-route").options].some(o=>o.value===id)) $("egress-route").add(new Option(id,id));
   $("egress-route").value=id||"";
  }
+ const network=s.node_network||{mode:"system"};
+ $("node-network-status").textContent=network.mode==="physical" ? (network.interface ? `已配置物理网卡：${network.interface}；DNS：${(network.dns_servers||[]).join("、")||"待加载"}。连通结果请看节点测速。` : "物理网卡尚未就绪，请检查网络连接。") : "当前跟随系统路由；本机 VPN 可能接管节点连接。";
  if(!policyDirty && document.activeElement!==$("state-policy")) $("state-policy").value=s.state_refresh_mode||"standby";
  const selected=$("pool-session").value;$("pool-session").replaceChildren(new Option("请选择现有模型会话",""));
  for(const session of s.sessions||[]) $("pool-session").add(new Option(`${session.model} · ${session.expected_length||"规则待识别"} · ${phases[session.phase]||session.phase}`,session.id));
@@ -36,7 +40,7 @@ $("pool-preset").addEventListener("click",()=>{advancedDirty=true;advancedRevisi
 $("advanced-form").addEventListener("submit",event=>{event.preventDefault();action(async()=>{
  if(!confirm("保存会清空 state 缓存，但保留节点已用/失败记录。更大的请求限制会占更多内存；跨出口使用 state 可能被上游拒绝。继续？"))return;
  const body=Object.fromEntries(Object.entries(advancedFields).map(([key,id])=>[key,Number($(id).value)]));
- Object.assign(body,{egress_mode:$("egress-mode").value,egress_route:$("egress-route").value,pool_enabled:$("pool-enabled").checked,external_proxy_only:$("external-only").checked});
+ Object.assign(body,{egress_mode:$("egress-mode").value,egress_route:$("egress-route").value,pool_enabled:$("pool-enabled").checked,external_proxy_only:$("external-only").checked,node_network_mode:$("node-network-mode").value,node_interface:$("node-interface").value.trim()});
  const revision=advancedRevision;const r=await api("advanced",body);if(revision===advancedRevision)advancedDirty=false;$("advanced-result").textContent=r.message;await refresh();
 });});
 async function loadLifecyclePool(){

@@ -220,6 +220,11 @@
               <p class="hint">“自定义 IP”是选择你有权使用的代理端点，不是任意伪造公网 IP。采集节点与转发节点不同，不保证底层公网 IP 不同；节点名也不证明国家或家宽。跨出口使用 state 属实验功能。</p>
               <label><input id="pool-enabled" type="checkbox" /> 启用代理池自动轮换（固定节点时始终只用固定节点）</label>
               <label><input id="external-only" type="checkbox" /> 外部代理模式：只接入用户自己的 HTTP/SOCKS5 端点</label>
+			  <label for="node-network-mode">连接节点时使用的网络</label>
+			  <select id="node-network-mode"><option value="physical">物理网卡 · 避开本机 VPN 隧道（macOS）</option><option value="system">系统网络 · 跟随本机 VPN / 路由</option></select>
+			  <label for="node-interface">物理网卡（留空自动选择）</label><input id="node-interface" placeholder="自动选择 Wi-Fi / 有线网卡" maxlength="32" />
+			  <p id="node-network-status" class="hint"></p>
+			  <p class="hint">物理网卡模式同时控制节点连接和 DNS；失败时不会偷偷改走 VPN。选择本地 HTTP/SOCKS5 端口时，后续线路仍由那个代理客户端决定。切换 Wi-Fi / 有线网络后请重新启动服务。</p>
               <p class="hint">外部代理模式会拒绝内嵌隧道协议节点；它不改变你使用网络的合规义务。开启前先在代理客户端加载订阅。</p>
               <button type="button" id="pool-preset" class="secondary">填入代理池自动轮换</button>
               <button type="submit">备份并保存高级设置</button>

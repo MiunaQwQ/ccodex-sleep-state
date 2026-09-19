@@ -15,8 +15,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gylive/ccodex-sleep-state/internal/netpath"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 )
+
+func TestPhysicalPathPreservesNodeIdentityAndSource(t *testing.T) {
+	node, err := ParseURI("anytls://fixture-password@node.invalid:443?sni=cert.invalid#fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := Build(node, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer system.Close()
+	path := &netpath.Path{Info: netpath.Info{Mode: "physical", Interface: "en-test"}}
+	physical, err := Build(node, 0, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer physical.Close()
+	if system.StableID != physical.StableID || system.Connection != physical.Connection || physical.NodePath != path {
+		t.Fatal("network policy changed the saved node identity or source")
+	}
+	if _, ok := node["interface-name"]; ok {
+		t.Fatal("runtime policy leaked into subscription")
+	}
+}
 
 func TestSubscriptionFormats(t *testing.T) {
 	QuietCore()
