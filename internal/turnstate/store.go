@@ -7,17 +7,19 @@ import (
 )
 
 type Snapshot struct {
-	Token   Token
-	Route   int
-	Version uint64
+	AcquiredAt time.Time
+	Token      Token
+	Route      int
+	Version    uint64
 }
 
 // PersistedSnapshot is the private, opaque form used by the local backup.
 // RouteID is stable across reloads; the in-memory route index is not.
 type PersistedSnapshot struct {
-	Token   string    `json:"token"`
-	RouteID string    `json:"route_id"`
-	Issued  time.Time `json:"issued"`
+	AcquiredAt time.Time `json:"acquired_at,omitempty"`
+	Token      string    `json:"token"`
+	RouteID    string    `json:"route_id"`
+	Issued     time.Time `json:"issued"`
 }
 
 // Persisted is intentionally limited to state candidates. Credentials and
@@ -32,6 +34,7 @@ type Persisted struct {
 // A response observation can invalidate only the snapshot used by that
 // request; the next valid standby is promoted immediately.
 type Store struct {
+	standbyLimit  int
 	holdActive    bool
 	mu            sync.Mutex
 	policy        Policy
@@ -44,7 +47,14 @@ type Store struct {
 
 const maxStandby = 16
 
-func New(p Policy) *Store { return &Store{policy: p} }
+func New(p Policy) *Store { return &Store{policy: p, standbyLimit: maxStandby} }
+
+func (s *Store) SetStandbyLimit(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.standbyLimit = max(0, min(maxStandby, n))
+	s.sortStandby()
+}
 
 func (s *Store) Acquire(now time.Time) (Snapshot, bool) {
 	s.mu.Lock()
@@ -117,7 +127,7 @@ func (s *Store) Offer(t Token, route int, now time.Time) bool {
 			return true
 		}
 	}
-	candidate := Snapshot{Token: t, Route: route}
+	candidate := Snapshot{Token: t, Route: route, AcquiredAt: now}
 	if !s.policy.Accept(s.active.Token, now) {
 		s.version++
 		candidate.Version = s.version
@@ -134,8 +144,8 @@ func (s *Store) Offer(t Token, route int, now time.Time) bool {
 
 func (s *Store) sortStandby() {
 	sort.SliceStable(s.standby, func(i, j int) bool { return s.standby[i].Token.Issued.After(s.standby[j].Token.Issued) })
-	if len(s.standby) > maxStandby {
-		s.standby = s.standby[:maxStandby]
+	if len(s.standby) > s.standbyLimit {
+		s.standby = s.standby[:s.standbyLimit]
 	}
 }
 
@@ -194,11 +204,11 @@ func (s *Store) Export(now time.Time, routeID func(int) string) Persisted {
 	s.promote(now)
 	result := Persisted{SavedAt: now.UTC()}
 	if s.policy.Accept(s.active.Token, now) {
-		result.Active = &PersistedSnapshot{Token: s.active.Token.Value, RouteID: routeID(s.active.Route), Issued: s.active.Token.Issued}
+		result.Active = &PersistedSnapshot{Token: s.active.Token.Value, RouteID: routeID(s.active.Route), Issued: s.active.Token.Issued, AcquiredAt: s.active.AcquiredAt}
 	}
 	for _, candidate := range s.standby {
 		if s.policy.Accept(candidate.Token, now) {
-			result.Standby = append(result.Standby, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued})
+			result.Standby = append(result.Standby, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued, AcquiredAt: candidate.AcquiredAt})
 		}
 	}
 	return result
@@ -219,7 +229,7 @@ func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int
 		if err != nil || !s.policy.Accept(t, now) {
 			return Snapshot{}, false
 		}
-		return Snapshot{Token: t, Route: route}, true
+		return Snapshot{Token: t, Route: route, AcquiredAt: raw.AcquiredAt}, true
 	}
 	if p.Active != nil {
 		if active, ok := add(*p.Active); ok {

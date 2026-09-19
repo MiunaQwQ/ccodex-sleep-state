@@ -95,12 +95,12 @@ func TestStreamRateLimitBlocksAllModelsAndRoutes(t *testing.T) {
 			for _, model := range settings.SupportedModels() {
 				w := httptest.NewRecorder()
 				e.ServeHTTP(w, request(strings.ReplaceAll(generation, settings.Model, model), "stream-rate-limited"))
-				if w.Code != 429 {
-					t.Fatalf("SSE account restriction lost for %s: %d", model, w.Code)
+				if w.Code != 200 {
+					t.Fatalf("probe stream limit must not block normal fallback for %s: %d", model, w.Code)
 				}
 			}
-			if calls.Load() != 1 || !e.Restricted() {
-				t.Fatalf("bypassed SSE rate limit calls=%d", calls.Load())
+			if calls.Load() != int32(len(settings.SupportedModels())*2) || e.Restricted() {
+				t.Fatalf("probe stream limit leaked into account guard calls=%d", calls.Load())
 			}
 		})
 	}

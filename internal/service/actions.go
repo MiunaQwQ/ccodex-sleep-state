@@ -418,7 +418,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
-		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。旧 state 缓存已清空；后续请求可能重新采集并消耗额度。上游限流不会被重置。"})
+		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。仍合格的本机 state 备份会恢复；新有效期或上限可能淘汰旧牌。采集预算和上游限流不会被重置。"})
 	case "/admin/api/preferences":
 		var v struct {
 			Model         string `json:"model"`

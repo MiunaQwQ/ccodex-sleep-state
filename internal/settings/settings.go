@@ -27,16 +27,17 @@ type Source struct {
 }
 
 type Config struct {
-	NodeNetworkMode   string `json:"node_network_mode,omitempty"`
-	NodeInterface     string `json:"node_interface,omitempty"`
-	ExternalProxyOnly bool   `json:"external_proxy_only,omitempty"`
-	StateRefreshMode  string `json:"state_refresh_mode,omitempty"`
-	RequestLimitMiB   int    `json:"request_limit_mib,omitempty"`
-	ZstdWindowMiB     int    `json:"zstd_window_mib,omitempty"`
-	CompactLimitMiB   int    `json:"compact_limit_mib,omitempty"`
-	EgressMode        string `json:"egress_mode,omitempty"`
-	EgressRoute       string `json:"egress_route,omitempty"`
-	PoolEnabled       bool   `json:"pool_enabled,omitempty"`
+	Collection        CollectionPolicy `json:"collection"`
+	NodeNetworkMode   string           `json:"node_network_mode,omitempty"`
+	NodeInterface     string           `json:"node_interface,omitempty"`
+	ExternalProxyOnly bool             `json:"external_proxy_only,omitempty"`
+	StateRefreshMode  string           `json:"state_refresh_mode,omitempty"`
+	RequestLimitMiB   int              `json:"request_limit_mib,omitempty"`
+	ZstdWindowMiB     int              `json:"zstd_window_mib,omitempty"`
+	CompactLimitMiB   int              `json:"compact_limit_mib,omitempty"`
+	EgressMode        string           `json:"egress_mode,omitempty"`
+	EgressRoute       string           `json:"egress_route,omitempty"`
+	PoolEnabled       bool             `json:"pool_enabled,omitempty"`
 
 	StateFallback        string   `json:"state_fallback,omitempty"`
 	Model                string   `json:"model,omitempty"`
@@ -65,7 +66,7 @@ type Config struct {
 
 func Default() Config {
 	return Config{StateRefreshMode: "on_demand", RequestLimitMiB: 64, ZstdWindowMiB: 64, CompactLimitMiB: 64, EgressMode: "state", Model: Model, AccountMode: "auto", UpstreamKind: "official", Listen: "127.0.0.1:17841", Upstream: "https://chatgpt.com/backend-api/codex", Direct: true,
-		ProxyURLs: []string{}, ProxyEnvs: []string{}, Subscriptions: []Source{}, ProbeSeconds: 20,
+		Collection: DefaultCollection(), ProxyURLs: []string{}, ProxyEnvs: []string{}, Subscriptions: []Source{}, ProbeSeconds: 20,
 		RefreshSeconds: 1200, CooldownSeconds: 180, MaxProbes: 6, TTLSeconds: 3600, BaselineBlocks: 10}
 }
 
@@ -91,6 +92,9 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if err := c.Collection.Validate(); err != nil {
+		return err
+	}
 	if c.NodeNetworkMode != "" && c.NodeNetworkMode != "system" && c.NodeNetworkMode != "physical" {
 		return errors.New("节点网络必须为 system 或 physical")
 	}

@@ -18,17 +18,27 @@ const timingFields = {
   refresh_before_seconds: "refresh-before",
   max_probes_per_round: "max-probes",
 };
+const collectionFields = {
+  standby_target: "standby-target", standby_spacing_seconds: "standby-spacing",
+  failure_interval_seconds: "failure-interval", failure_max_interval_seconds: "failure-max-interval",
+  search_budget: "search-budget", search_pause_seconds: "search-pause",
+  hourly_budget: "hourly-budget", idle_seconds: "collection-idle",
+};
 function readTiming() {
-  return Object.fromEntries(Object.entries(timingFields).map(([key, id]) => [key, Number($(id).value)]));
+  return { ...Object.fromEntries(Object.entries(timingFields).map(([key, id]) => [key, Number($(id).value)])),
+    collection: Object.fromEntries(Object.entries(collectionFields).map(([key, id]) => [key, Number($(id).value)])) };
 }
 function timingSummary() {
   const t = readTiming();
   $("refresh-before").setCustomValidity(t.refresh_before_seconds >= t.state_ttl_seconds ? "提前刷新时间必须小于本地有效期" : "");
-  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}成功后至少间隔 ${t.probe_cooldown_seconds} 秒；失败不冷却，每批 ${t.max_probes_per_round} 次后继续；state 签发约 ${t.state_ttl_seconds - t.refresh_before_seconds} 秒后进入刷新窗口。`;
+  const c = t.collection;
+  $("failure-max-interval").setCustomValidity(c.failure_max_interval_seconds < c.failure_interval_seconds ? "最大间隔不得小于初始间隔" : "");
+  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}失败从 ${c.failure_interval_seconds} 秒起指数退避，最多 ${c.failure_max_interval_seconds} 秒；连续失败 ${c.search_budget} 次暂停 ${c.search_pause_seconds} 秒。所有会话合计滚动一小时最多 ${c.hourly_budget} 次额外采集。备用目标 ${c.standby_target} 张，第一张立即补充，后续间隔至少 ${c.standby_spacing_seconds} 秒；空闲 ${c.idle_seconds} 秒暂停后台补采。`;
 }
 function fillTiming(t) {
   if (!t) return;
   for (const [key, id] of Object.entries(timingFields)) $(id).value = t[key];
+  for (const [key, id] of Object.entries(collectionFields)) $(id).value = t.collection?.[key] ?? "";
   timingSummary();
 }
 function notice(text) {
@@ -177,6 +187,15 @@ async function refresh() {
         "hint",
       ),
     );
+  for (const model of state.supported_models || []) {
+    if ((state.sessions || []).some(session => session.model === model)) continue;
+    const row = textNode("div", "", "session");
+    const detail = textNode("div", "", "session-detail");
+    detail.append(textNode("strong", `${model} · 等待首次请求`));
+    detail.append(textNode("p", "主用 0 张 · 备用 0 张 · 尚无失败记录。收到此模型的真实请求后，建立独立牌池；不会借用其它模型的 state。", "hint"));
+    row.append(detail);
+    $("sessions").append(row);
+  }
   for (const [i, session] of (state.sessions || []).entries()) {
     let description =
       "会话 " + (i + 1) + " · " + (phases[session.phase] || session.phase);
@@ -200,7 +219,44 @@ async function refresh() {
             "hint",
           ),
         );
+    detail.classList.add("session-detail");
     row.append(detail);
+    const cards = textNode("div", "", "state-cards");
+    for (const card of session.states || []) {
+      const item = textNode("div", "", "state-card");
+      item.append(textNode("strong", `${card.role === "active" ? "主用" : "备用"} · ${card.id.slice(0, 8)}`));
+      item.append(textNode("p", `来源节点：${card.route_label || card.route_id}`));
+      item.append(textNode("p", `取得：${stateTime(card.acquired_at)} · 已取得 ${card.acquired_at?.startsWith("0001") ? "未知" : duration(card.age_seconds)}`));
+      item.append(textNode("p", `签发：${stateTime(card.issued_at)}`));
+      item.append(textNode("p", `本地预计到期：${stateTime(card.expires_at)}`));
+      const left = textNode("p", `剩余 ${duration(card.remaining_seconds)}`, "state-countdown");
+      left.dataset.expires = card.expires_at;
+      item.append(left, textNode("small", "使用时固定来源节点；到期前 30 秒停止接入新请求"));
+      cards.append(item);
+    }
+    if ((session.states || []).length) detail.append(cards);
+    if (session.collection) {
+      const c = session.collection;
+      const reasons = {pool_ready:"主备已就绪", missing_active:"等待获取主用", missing_standby:"准备补第一张备用", standby_spacing:"备用错峰等待", standby_refresh:"等待更新最早到期的备用", refresh_active:"等待更新主用", success_cooldown:"成功后冷却", failure_interval:"失败后退避", search_budget:"连续失败预算暂停", hourly_budget:"每小时总预算暂停", idle:"空闲暂停，收到新请求后恢复", budget_storage_error:"预算记录异常，额外采集停止"};
+      const failureNames = {shape_mismatch:"state 长度不符合", state_time_rejected:"state 过期或时间异常", duplicate_state:"返回重复 state", network_failed:"连接失败或超时", missing_state_header:"未返回 state", invalid_state_envelope:"state 格式错误", incomplete_response:"回复未完整结束", upstream_rejected:"上游拒绝", model_capacity:"模型容量不足", upstream_rate_limited:"上游限流", response_failed:"上游回复失败"};
+      const routeName = id => (state.routes_catalog || []).find(r => r.id === id)?.label || (pool?.routes || []).find(r => r.id === id)?.label || (session.states || []).find(r => r.route_id === id)?.route_label || id;
+      if (c.last_failure_at && !c.last_failure_at.startsWith("0001")) {
+        const failed = textNode("p", "", "hint");
+        failed.append(textNode("span", `最近补采失败：${stateTime(c.last_failure_at)} · `));
+        const age = textNode("span", `${duration(c.last_failure_ago_seconds)}前`);
+        age.dataset.since = c.last_failure_at;
+        failed.append(age, textNode("span", ` · ${routeName(c.last_failure_route)} · ${failureNames[c.last_failure_reason] || c.last_failure_reason}`));
+        detail.append(failed);
+      } else detail.append(textNode("p", "最近补采失败：暂无记录", "hint"));
+      const use = c.last_use_failure;
+      if (use?.at && !use.at.startsWith("0001")) {
+        const failed = textNode("p", `最近 state 使用失败：${stateTime(use.at)} · `, "hint");
+        const age = textNode("span", ""); age.dataset.since = use.at;
+        failed.append(age, textNode("span", ` · ${routeName(use.route)} · ${failureNames[use.reason] || use.reason} · state ${use.state_id?.slice(0,8)}`));
+        detail.append(failed);
+      }
+      detail.append(textNode("p", `全程序最近一小时额外采集 ${c.hourly_used}/${c.hourly_budget} 次；本会话连续失败 ${c.failures}/${c.search_budget} 次。${reasons[c.reason] || c.reason}${!c.idle && c.wait_seconds > 0 ? `，约 ${duration(c.wait_seconds)} 后可采集（${stateTime(c.next_at)}）` : ""}。`, "hint"));
+    }
     if (session.observed_length)
       detail.append(
         textNode(
@@ -229,7 +285,7 @@ async function refresh() {
         action(async () => {
           if (
             !confirm(
-              `重新采集会使用这个会话的账号和模型，失败会在后台连续寻找直到成功，会消耗额度；登录失效或上游限流时暂停。继续？`,
+              `重新采集会使用这个会话的账号和模型，失败会按间隔和预算自动补采，会消耗额度；登录失效或上游限流时暂停。继续？`,
             )
           )
             return;
@@ -587,7 +643,7 @@ for (const id of ["model-select", "account-select", "fallback-select"])
     preferencesDirty = true;
   });
 
-for (const id of Object.values(timingFields)) {
+for (const id of [...Object.values(timingFields), ...Object.values(collectionFields)]) {
   $(id).addEventListener("input", () => { timingDirty = true; timingSummary(); });
 }
 $("timing-defaults").addEventListener("click", () => {
@@ -608,7 +664,7 @@ $("timing-form").addEventListener("submit", (event) => {
   timingSummary();
   if (!$("timing-form").reportValidity()) return;
   const next = readTiming();
-  if (!confirm("保存采集设置？旧配置会备份，现有 state 缓存会清空。无需重启 Codex；后续请求可能重新采集并消耗额度。")) return;
+  if (!confirm("保存采集设置？旧配置会备份，仍合格的 state 会从本机备份恢复，预算不重置。无需重启 Codex；有效期或备用上限变更可能淘汰部分 state。")) return;
   action(async () => {
     const result = await api("timing", next);
     // Do not discard edits typed while the save request was in flight.
@@ -646,3 +702,20 @@ $("sort-latency").addEventListener("click",()=>{
  const score=card=>{const r=results[card.dataset.nodeCard];return r?.selectable ? r.duration_ms : Infinity;};
  [...document.querySelectorAll("[data-node-card]")].sort((a,b)=>score(a)-score(b)).forEach(card=>$("routes-list").append(card));
 });
+
+function stateTime(value) {
+  if (!value || value.startsWith("0001")) return "未知（旧备份未记录）";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "未知" : date.toLocaleString("zh-CN", {hour12:false});
+}
+function duration(seconds) {
+  const n = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(n / 3600)}时${Math.floor(n % 3600 / 60)}分${n % 60}秒`;
+}
+setInterval(() => {
+  for (const el of document.querySelectorAll("[data-since]")) el.textContent = `${duration((Date.now() - Date.parse(el.dataset.since))/1000)}前`;
+  for (const el of document.querySelectorAll("[data-expires]")) {
+    const left = Math.max(0, Math.floor((Date.parse(el.dataset.expires) - Date.now()) / 1000));
+    el.textContent = left > 30 ? `剩余 ${duration(left)}` : "已进入停用窗口，等待刷新列表";
+  }
+}, 1000);

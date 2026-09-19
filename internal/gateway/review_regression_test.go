@@ -47,15 +47,22 @@ func TestReviewProbeRejectionSurvivesPoolWriteFailure(t *testing.T) {
 			}
 			defer release(s)
 			e.refresh(context.Background(), s, true)
-			if got, _ := s.rejection(); got != status {
-				t.Fatalf("lost upstream rejection: got %d want %d", got, status)
+			s.mu.Lock()
+			paused := time.Now().Before(s.upstreamPause)
+			s.mu.Unlock()
+			if !paused {
+				t.Fatalf("probe rejection did not pause this model: status=%d", status)
 			}
 			if e.pool.Err() == nil {
 				t.Fatal("expected pool persistence error")
 			}
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, request(generation, "review-fake-rejected-key"))
-			if w.Code != status || calls.Load() != 1 {
+			if status == 429 {
+				if w.Code != 503 || calls.Load() != 1 {
+					t.Fatalf("rate-limited probe blocked incorrectly: response=%d calls=%d", w.Code, calls.Load())
+				}
+			} else if w.Code != 503 || calls.Load() != 1 {
 				t.Fatalf("rejection bypass: response=%d calls=%d", w.Code, calls.Load())
 			}
 		})

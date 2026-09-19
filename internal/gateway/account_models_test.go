@@ -146,12 +146,12 @@ func TestRejectionSurvivesModelSwitch(t *testing.T) {
 			for _, m := range settings.SupportedModels() {
 				w := httptest.NewRecorder()
 				e.ServeHTTP(w, request(strings.ReplaceAll(generation, settings.Model, m), "same-rejected-account"))
-				if w.Code != code {
+				if w.Code != 503 {
 					t.Fatalf("model=%s status=%d", m, w.Code)
 				}
 			}
-			if calls.Load() != 1 {
-				t.Fatalf("switched models retried rejected credentials %d times", calls.Load())
+			if calls.Load() != int32(len(settings.SupportedModels())) {
+				t.Fatalf("each model should have an isolated probe: %d", calls.Load())
 			}
 		})
 	}
@@ -385,14 +385,14 @@ func TestStateFallbackNeverBypassesAccountRejection(t *testing.T) {
 			e.config.StateFallback = "passthrough"
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, request(generation, "fallback-rejected"))
-			if w.Code != code || calls.Load() != 1 {
-				t.Fatalf("status=%d calls=%d", w.Code, calls.Load())
+			if w.Code != code || calls.Load() != 2 {
+				t.Fatalf("formal request still reached upstream after probe: status=%d calls=%d", w.Code, calls.Load())
 			}
 		})
 	}
 }
 
-func TestFailedCollectionHasNoCooldownAndKeepsOpaqueSessionID(t *testing.T) {
+func TestFailedCollectionBackoffBlocksManualRetryAndKeepsOpaqueSessionID(t *testing.T) {
 	var calls atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); complete(w, fakeToken(11, 31)) }))
 	w := httptest.NewRecorder()
@@ -407,14 +407,14 @@ func TestFailedCollectionHasNoCooldownAndKeepsOpaqueSessionID(t *testing.T) {
 	if err := e.RetryState(context.Background(), s.id); err == nil {
 		t.Fatal("bad state became accepted")
 	}
-	if calls.Load() != 2 {
-		t.Fatal("failed round incorrectly cooled down")
+	if calls.Load() != 1 {
+		t.Fatal("manual retry bypassed failure backoff")
 	}
 	s.mu.Lock()
 	cooling := time.Now().Before(s.nextProbe)
 	s.mu.Unlock()
-	if cooling {
-		t.Fatal("failed collection set success cooldown")
+	if !cooling {
+		t.Fatal("failed collection did not set failure backoff")
 	}
 	status, _ := json.Marshal(e.Status())
 	if !strings.Contains(string(status), `"id":"`+s.id+`"`) {
@@ -481,6 +481,7 @@ func TestManualRetryReportsBusyAndSuccess(t *testing.T) {
 
 func TestBackgroundSelectionPinsCredentialGuardAcrossIdleBoundary(t *testing.T) {
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("selection test must not send requests") }))
+	e.config.Collection.IdleSeconds = int(idleLifetime.Seconds())
 	headers := request(generation, "worker-pin-account").Header
 	s, err := e.borrow(headers)
 	if err != nil {

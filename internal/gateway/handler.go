@@ -157,7 +157,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if (inject || compact) && usable {
 		route = snapshot.Route
 	}
-	if e.config.EgressMode == "random" || e.config.EgressMode == "fixed" {
+	// A state and its source route form one immutable request snapshot. User
+	// egress preferences apply only when no state is being injected.
+	stateBound := inject && usable
+	if !stateBound && (e.config.EgressMode == "random" || e.config.EgressMode == "fixed") {
 		selected, err := e.selectEgress(snapshot.Route, (inject || compact) && usable)
 		if err != nil {
 			fail(w, 503, "egress_unavailable", err.Error())
@@ -171,7 +174,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "pool_node_disabled", "所选出口已停用，请在代理池手动放回或选择其他出口")
 		return
 	}
-	if e.config.PoolEnabled && generation && e.config.EgressMode == "random" && e.config.PinnedRoute == "" {
+	if !stateBound && e.config.PoolEnabled && generation && e.config.EgressMode == "random" && e.config.PinnedRoute == "" {
 		// Reserve before dispatch so concurrent requests cannot consume one random
 		// node twice. A fixed user exit is explicitly reusable.
 		allowUsed := e.config.EgressMode != "random"
@@ -277,7 +280,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "compaction", compact)
 	}()
 	proxy.ServeHTTP(tracked, r)
-	if e.config.PoolEnabled && generation && e.config.EgressMode == "random" && e.config.PinnedRoute == "" {
+	if !stateBound && e.config.PoolEnabled && generation && e.config.EgressMode == "random" && e.config.PinnedRoute == "" {
 		st, reason := "used", "request_dispatched"
 		if tracked.status >= 400 {
 			st, reason = "failed", "request_failed"

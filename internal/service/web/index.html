@@ -188,10 +188,21 @@
             <form id="timing-form">
               <div class="settings-grid">
                 <div><label for="probe-timeout">单次探测超时（秒）</label><input id="probe-timeout" type="number" min="1" max="60" step="1" required /><small>1–60 秒；不是正常回复的超时。</small></div>
-                <div><label for="probe-cooldown">成功后最短采集间隔（秒）</label><input id="probe-cooldown" type="number" min="30" max="3600" step="1" required /><small>只在成功后生效；312、超时、连接失败后不冷却。</small></div>
+                <div><label for="probe-cooldown">成功后最短采集间隔（秒）</label><input id="probe-cooldown" type="number" min="30" max="3600" step="1" required /><small>主备就绪后的成功冷却；失效可打断此冷却，但不重置失败间隔或预算。</small></div>
                 <div><label for="state-ttl">本地 state 有效期（秒）</label><input id="state-ttl" type="number" min="120" max="3600" step="1" required /><small>120–3600 秒，从 state 签发时间计算；最后 30 秒不再接纳新请求。</small></div>
                 <div><label for="refresh-before">到期前多久刷新（秒）</label><input id="refresh-before" type="number" min="30" max="3599" step="1" required /><small>至少 30 秒，必须小于有效期；不是每隔这么久刷新。</small></div>
-                <div><label for="max-probes">每个调度批次探测次数</label><input id="max-probes" type="number" min="1" max="20" step="1" required /><small>1–20 次；失败立即进入下一批，不限制总尝试次数。</small></div>
+                <div><label for="max-probes">每个调度批次探测次数</label><input id="max-probes" type="number" min="1" max="20" step="1" required /><small>1–20 次；每次失败都会结束当前批次，等待失败间隔；同时受总预算限制。</small></div>
+              </div>
+              <h3>失败补采与备用池</h3>
+              <div class="settings-grid">
+                <div><label for="standby-target">备用 state 上限（张）</label><input id="standby-target" type="number" min="0" max="16" step="1" required /><small>不含主用；设为 0 只保留主用。启用代理池时生效。</small></div>
+                <div><label for="standby-spacing">备用错峰间隔（秒）</label><input id="standby-spacing" type="number" min="30" max="3600" step="1" required /><small>第一张备用立即补；后续按间隔补充、逐张替换。</small></div>
+                <div><label for="failure-interval">失败后初始间隔（秒）</label><input id="failure-interval" type="number" min="1" max="3600" step="1" required /><small>包括网络失败、没有 state 或长度不符合。</small></div>
+                <div><label for="failure-max-interval">失败后最大间隔（秒）</label><input id="failure-max-interval" type="number" min="1" max="3600" step="1" required /><small>连续失败时翻倍等待，达到此值后不再增加。</small></div>
+                <div><label for="search-budget">连续失败预算（次）</label><input id="search-budget" type="number" min="1" max="1000" step="1" required /><small>本会话成功后归零；失败达到预算后暂停。</small></div>
+                <div><label for="search-pause">连续失败预算耗尽后暂停（秒）</label><input id="search-pause" type="number" min="30" max="86400" step="1" required /><small>暂停结束可自动继续，仍受每小时总预算约束。</small></div>
+                <div><label for="hourly-budget">全程序滚动一小时采集预算（次）</label><input id="hourly-budget" type="number" min="1" max="1000" step="1" required /><small>所有会话和手动采集合计；不计普通 AI 请求。重启及保存设置不重置。</small></div>
+                <div><label for="collection-idle">无请求多久暂停后台采集（秒）</label><input id="collection-idle" type="number" min="30" max="1800" step="1" required /><small>收到新的 AI 请求后恢复，避免无人使用时不断补采。</small></div>
               </div>
               <p id="timing-summary" class="hint" aria-live="polite"></p>
               <div class="actions">
@@ -200,7 +211,7 @@
                 <button type="button" id="timing-cancel" class="quiet">撤销未保存修改</button>
                 <button type="submit">保存采集设置</button>
               </div>
-              <p class="hint">预设只填表，不自动保存。保存前会确认，成功后无需重启；现有 state 缓存会清空，后续请求可能重新采集。上游拒绝或限流期间不允许重建采集器。</p>
+              <p class="hint">预设只填表，不自动保存。保存前会确认，成功后无需重启；仍合格的本机备份会恢复；新有效期或上限可能淘汰旧牌，采集预算不会重置。上游拒绝或限流期间不允许重建采集器。</p>
               <p id="timing-result" class="result" role="status"></p>
             </form>
           </section>
@@ -213,8 +224,9 @@
                 <div><label for="compact-limit">压缩回复上限（MiB）</label><input id="compact-limit" type="number" min="16" max="128" required /></div>
               </div>
               <p class="hint">默认 64 MiB，最高 128 MiB。解决本地 413，不会提高上游限制。越大越占内存；最多 4 个大请求同时处理，其余等待。</p>
-              <label for="egress-mode">正常请求的出口</label>
-              <select id="egress-mode"><option value="state">兼容模式 · 使用采集 state 的节点</option><option value="random">独立随机 · 从可用池选择另一个节点</option><option value="fixed">用户固定 · 使用下面选定的节点</option></select>
+              <label for="egress-mode">未携带 state 时的出口</label>
+              <select id="egress-mode"><option value="state">默认出口</option><option value="random">随机出口 · 仅无 state 时</option><option value="fixed">用户固定 · 使用下面选定的节点</option></select>
+              <p class="hint">凡是注入 state 的请求，始终使用该 state 的来源节点。这里的随机/固定选择仅用于未注入 state 的请求。</p>
               <label for="egress-route">固定节点（先读取代理池）</label><select id="egress-route"><option value="">请先读取</option></select>
               <button type="button" id="load-egress" class="secondary">读取节点，不探测</button>
               <p class="hint">“自定义 IP”是选择你有权使用的代理端点，不是任意伪造公网 IP。采集节点与转发节点不同，不保证底层公网 IP 不同；节点名也不证明国家或家宽。跨出口使用 state 属实验功能。</p>
@@ -391,7 +403,7 @@
             ><button id="auto-route" class="secondary">全选候选</button>
           </div>
           <p class="hint">
-            刷新列表只读取已加载节点。更新订阅按钮才重新下载来源。保存勾选会启用代理池和连续采集；节点卡片上的“固定此节点”可切换固定/自动模式。手动停用的节点仍需在“节点状态”放回。关闭注入可停止额外采集。
+            刷新列表只读取已加载节点。更新订阅按钮才重新下载来源。保存勾选会启用代理池和按预算补采；节点卡片上的“固定此节点”可切换固定/自动模式。手动停用的节点仍需在“节点状态”放回。关闭注入可停止额外采集。
           </p>
           <div class="actions"><button id="save-selection">保存勾选</button><button id="reload-pool" class="secondary">更新订阅并重新载入</button></div><p id="selection-summary" class="hint"></p>
  <div class="card"><h2>批量延迟测试</h2><p class="hint">测量经过节点到上游的响应耗时，包含连接与 TLS；不是 ICMP ping，也不代表可以取得 292。</p><div class="actions"><button id="test-all-nodes">测试全部节点</button><button id="test-selected-nodes" class="secondary">测试已勾选</button><button id="stop-node-tests" class="quiet">停止测试</button></div><label for="node-test-timeout">单节点超时（秒）</label><input id="node-test-timeout" type="number" value="6" min="1" max="30" /><div class="actions"><button id="select-reachable" class="secondary">仅勾选测试通过的节点</button><button id="sort-latency" class="secondary">按延迟从低到高排序</button></div><p id="node-test-progress" role="status" class="hint">尚未开始</p></div>
@@ -404,7 +416,7 @@
           <button id="reload-lifecycle-pool">刷新节点状态</button>
           <label for="pool-filter">查看清单</label><select id="pool-filter"><option value="available">可用池</option><option value="used">已用清单</option><option value="failed">失败清单</option><option value="disabled">已清理（停用）</option></select>
           <label for="pool-session">单节点采集使用的现有会话</label><select id="pool-session"><option value="">先在 Codex 发一条消息，再刷新</option></select>
-          <p class="hint">单节点重试只探测选中节点一次；失败不增加冷却，后台按当前策略继续寻找。不读取登录文件、不跳过 401/403/429、不自动重放正式请求。主用仍可用时，成功的新值可作为备用。</p>
+          <p class="hint">单节点重试只探测选中节点一次；失败按退避间隔和预算补采，后台按当前策略继续寻找。不读取登录文件、不跳过 401/403/429、不自动重放正式请求。主用仍可用时，成功的新值可作为备用。</p>
           <div class="actions"><button id="pool-select-all" class="secondary">全选当前清单</button><button id="pool-recycle" class="secondary">选中项放回可用池</button><button id="pool-disable" class="secondary">清理选中项</button></div>
           <p id="pool-summary" class="hint"></p><div id="pool-list" class="stack"></div><p id="pool-result" role="status"></p>
         </section>

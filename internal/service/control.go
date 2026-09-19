@@ -25,6 +25,7 @@ import (
 // control owns a whole route generation. Reconfiguration never mutates routes
 // under an active request, and never discards an account's upstream rejection.
 type control struct {
+	collection            *gateway.CollectionBudget
 	pool                  *routepool.Store
 	backup                *turnstate.BackupStore
 	targetURL, targetKind string
@@ -49,6 +50,15 @@ type control struct {
 }
 
 func (c *control) start(routes []proxyroute.Route) {
+	if c.collection == nil {
+		var err error
+		c.collection, err = gateway.OpenCollectionBudget(filepath.Join(c.dir, "collection-budget.json"))
+		if err != nil {
+			closeRoutes(routes)
+			c.routeError = err.Error()
+			return
+		}
+	}
 	if c.pool == nil {
 		var err error
 		c.pool, err = routepool.Open(filepath.Join(c.dir, "pool-state.json"))
@@ -97,6 +107,7 @@ func (c *control) start(routes []proxyroute.Route) {
 	effective := c.effective()
 	c.engine = gateway.New(effective, selected, c.log, c.pool)
 	c.engine.SetStateBackup(c.backup)
+	c.engine.SetCollectionBudget(c.collection)
 	engine, done := c.engine, c.done
 	go func() { defer close(done); engine.Run(ctx) }()
 	c.routeError = ""

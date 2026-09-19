@@ -10,15 +10,16 @@ import (
 )
 
 type timingPreferences struct {
-	ProbeSeconds    int `json:"probe_timeout_seconds"`
-	RefreshSeconds  int `json:"refresh_before_seconds"`
-	CooldownSeconds int `json:"probe_cooldown_seconds"`
-	MaxProbes       int `json:"max_probes_per_round"`
-	TTLSeconds      int `json:"state_ttl_seconds"`
+	Collection      *settings.CollectionPolicy `json:"collection,omitempty"`
+	ProbeSeconds    int                        `json:"probe_timeout_seconds"`
+	RefreshSeconds  int                        `json:"refresh_before_seconds"`
+	CooldownSeconds int                        `json:"probe_cooldown_seconds"`
+	MaxProbes       int                        `json:"max_probes_per_round"`
+	TTLSeconds      int                        `json:"state_ttl_seconds"`
 }
 
 func timingFrom(c settings.Config) timingPreferences {
-	return timingPreferences{c.ProbeSeconds, c.RefreshSeconds, c.CooldownSeconds, c.MaxProbes, c.TTLSeconds}
+	return timingPreferences{&c.Collection, c.ProbeSeconds, c.RefreshSeconds, c.CooldownSeconds, c.MaxProbes, c.TTLSeconds}
 }
 
 // applyPreferences runs under the management lock, after active replies drain.
@@ -30,6 +31,9 @@ func (c *control) applyPreferences(ctx context.Context, model, accountMode, fall
 		t := timing[0]
 		next.ProbeSeconds, next.RefreshSeconds, next.CooldownSeconds = t.ProbeSeconds, t.RefreshSeconds, t.CooldownSeconds
 		next.MaxProbes, next.TTLSeconds = t.MaxProbes, t.TTLSeconds
+		if t.Collection != nil {
+			next.Collection = *t.Collection
+		}
 	}
 	return c.applyConfig(ctx, next)
 }

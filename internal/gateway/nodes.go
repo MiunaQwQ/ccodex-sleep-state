@@ -51,6 +51,7 @@ func (e *Engine) invalidate(s *session, used turnstate.Snapshot, route int, resu
 	}
 	s.mu.Unlock()
 	if invalidated {
+		e.collection.RecordUseFailure(s.backupKey, UseFailure{At: time.Now(), Reason: result, Route: e.routes[route].ID, StateID: used.Token.Fingerprint})
 		e.persistState(s)
 	}
 	e.signal()

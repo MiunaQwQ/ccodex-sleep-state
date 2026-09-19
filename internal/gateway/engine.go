@@ -59,6 +59,7 @@ type session struct {
 }
 
 type Engine struct {
+	collection     *CollectionBudget
 	onDemand       atomic.Bool
 	pool           *routepool.Store
 	backup         *turnstate.BackupStore
@@ -81,6 +82,7 @@ type Engine struct {
 func New(c settings.Config, routes []proxyroute.Route, logger *slog.Logger, pools ...*routepool.Store) *Engine {
 	e := &Engine{config: c, routes: routes, log: logger, sessions: make(map[string]*session), limits: make(map[string]*credentialLimit), probeSlot: make(chan struct{}, 1), wake: make(chan struct{}, 1)}
 	e.pool, _ = routepool.Open("")
+	e.collection, _ = OpenCollectionBudget("")
 	if len(pools) > 0 && pools[0] != nil {
 		e.pool = pools[0]
 	}
@@ -159,6 +161,9 @@ func (e *Engine) borrow(h http.Header, models ...string) (*session, error) {
 		policy := policyFor(e.config, h)
 		s = &session{id: rand.Text(), model: model, policy: policy, limit: limit, headers: safe, backupKey: stateBackupKey(key, e.config.Upstream), state: turnstate.New(turnstate.Policy{Blocks: policy.Blocks, TTL: time.Duration(e.config.TTLSeconds) * time.Second, Refresh: time.Duration(e.config.RefreshSeconds) * time.Second})}
 		s.state.HoldActive(e.onDemand.Load())
+		if e.config.PoolEnabled {
+			s.state.SetStandbyLimit(e.config.Collection.StandbyTarget)
+		}
 		e.restoreState(s)
 		e.sessions[key] = s
 	}
@@ -240,8 +245,8 @@ func (e *Engine) Run(ctx context.Context) {
 				e.refresh(ctx, s, false)
 			}
 			releaseWork(s)
-			// Failed rounds continue immediately. Only success or an explicit upstream
-			// pause stops collection; the service context owns it, not a browser request.
+			// Wake immediately only when another probe is due. Failed attempts are
+			// paced by the shared persistent collection budget.
 			s.mu.Lock()
 			due := s.probing == nil && !time.Now().Before(s.nextProbe) && !time.Now().Before(s.upstreamPause)
 			s.mu.Unlock()
@@ -256,14 +261,8 @@ func (e *Engine) Run(ctx context.Context) {
 func releaseWork(s *session) { s.mu.Lock(); s.busy--; s.queued = false; s.mu.Unlock() }
 
 func (e *Engine) needsCollection(s *session, now time.Time) bool {
-	status := s.state.Status(now)
-	if e.onDemand.Load() {
-		return !e.statePoolReady(s, now)
-	}
-	if e.config.PoolEnabled {
-		return s.state.NeedsRefresh(now) || !e.statePoolReady(s, now)
-	}
-	return s.state.NeedsRefresh(now) || !status.Ready
+	at, _ := e.collectionAt(s, now)
+	return !at.IsZero() && !now.Before(at)
 }
 
 func (e *Engine) statePoolReady(s *session, now time.Time) bool {
@@ -271,20 +270,7 @@ func (e *Engine) statePoolReady(s *session, now time.Time) bool {
 	if !status.Usable {
 		return false
 	}
-	// A selected proxy pool keeps two standby cards by default. The first
-	// accepted card is usable immediately; the extra cards make a bad response
-	// switch without waiting for another network round.
-	if e.config.PoolEnabled {
-		required := len(e.routes) - 1
-		if required > 2 {
-			required = 2
-		}
-		if required < 0 {
-			required = 0
-		}
-		return status.Standby >= required
-	}
-	return true
+	return status.Standby >= e.standbyTarget()
 }
 
 // One-use mode remains an explicit advanced option from upstream 0.4.
@@ -323,11 +309,10 @@ func (e *Engine) backgroundWork(now time.Time) []*session {
 	for key, s := range e.sessions {
 		s.mu.Lock()
 		idle := now.Sub(s.lastUsed) > idleLifetime
-		searching := s.activated && e.needsCollection(s, now)
 		available := s.probing == nil && !s.queued
-		if idle && !searching && available && s.busy == 0 {
+		if idle && available && s.busy == 0 {
 			delete(e.sessions, key)
-		} else if (!idle || searching) && available && s.activated {
+		} else if now.Sub(s.lastUsed) < time.Duration(e.config.Collection.IdleSeconds)*time.Second && available && s.activated {
 			s.busy++
 			s.queued = true
 			work = append(work, s)
@@ -388,7 +373,7 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		pinned = only[0]
 		limit = 1
 	}
-	attempts, successes := 0, 0
+	attempts := 0
 	for i := 0; i < len(e.routes) && attempts < limit; i++ {
 		if ctx.Err() != nil || e.disabled.Load() || e.injectionEpoch.Load() != epoch {
 			return
@@ -411,6 +396,12 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		if entry.State == "disabled" {
 			continue
 		}
+		if until, reason := e.collection.Reserve(s.backupKey, time.Now(), e.config.Collection); !until.IsZero() {
+			s.mu.Lock()
+			s.nextProbe, s.diagnostic = until, reason
+			s.mu.Unlock()
+			return
+		}
 		if e.config.PoolEnabled && len(only) == 0 && e.config.PinnedRoute == "" {
 			if err := e.pool.ClaimProbe(e.routes[route].ID, len(only) > 0); err != nil {
 				if e.pool.Err() != nil {
@@ -423,7 +414,14 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		started := time.Now()
 		token, status, retryAfter, err := e.probe(ctx, s.headers, e.routes[route], s.model)
 		accepted := false
-		if err == nil && !e.disabled.Load() && e.injectionEpoch.Load() == epoch {
+		duplicate := false
+		for _, card := range e.cards(s, time.Now()) {
+			if card.ID == token.Fingerprint {
+				duplicate = true
+				break
+			}
+		}
+		if err == nil && !duplicate && !e.disabled.Load() && e.injectionEpoch.Load() == epoch {
 			accepted = s.state.Offer(token, route, time.Now())
 			if accepted {
 				e.persistState(s)
@@ -434,6 +432,8 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 			switch {
 			case accepted:
 				result = "accepted"
+			case duplicate:
+				result = "duplicate_state"
 			case token.Blocks != s.policy.Blocks:
 				result = "shape_mismatch"
 			default:
@@ -447,7 +447,15 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		if errors.As(err, &streamFailure) && streamFailure.status != 0 {
 			rejectionStatus = streamFailure.status
 		}
-		rejected := e.reject(s, rejectionStatus, retryAfter, route)
+		if rejectionStatus == http.StatusUnauthorized || rejectionStatus == http.StatusForbidden || rejectionStatus == http.StatusTooManyRequests {
+			s.mu.Lock()
+			s.upstreamPause = time.Now().Add(max(30*time.Second, retryAfter))
+			s.diagnostic = map[int]string{http.StatusUnauthorized: "upstream_rejected", http.StatusForbidden: "upstream_rejected", http.StatusTooManyRequests: "upstream_rate_limited"}[rejectionStatus]
+			s.mu.Unlock()
+		}
+		// Probe failures belong to this model session only. A model that cannot
+		// produce a state must never poison another model's usable state pool.
+		e.collection.Complete(s.backupKey, time.Now(), accepted, e.config.Collection, result, e.routes[route].ID)
 		if e.config.PoolEnabled {
 			// A probe result is a health observation, not a permanent lease. Keep
 			// the route eligible so one bad response immediately advances to the
@@ -464,6 +472,8 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 			s.nextProbe = time.Now().Add(time.Duration(e.config.CooldownSeconds) * time.Second)
 		} else if accepted {
 			s.nextProbe = time.Time{}
+		} else {
+			s.nextProbe = e.collection.Status(s.backupKey, time.Now(), e.config.Collection).NextAt
 		}
 		s.mu.Unlock()
 		e.recordNode(s, route, result, status, token.Blocks, time.Since(started), "probe")
@@ -473,7 +483,10 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 			"expected_blocks", s.policy.Blocks, "model", s.model)
 		// Preserve upstream account limits rather than converting them to a
 		// generic "no state" error or moving on to another egress.
-		if rejected {
+		if rejectionStatus == http.StatusUnauthorized || rejectionStatus == http.StatusForbidden {
+			return
+		}
+		if rejectionStatus == http.StatusTooManyRequests {
 			return
 		}
 		// A completed error event is an upstream decision, not a reason to gamble
@@ -485,10 +498,11 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 			return
 		}
 		if accepted {
-			successes++
-			if (bootstrap && !e.config.PoolEnabled) || e.statePoolReady(s, time.Now()) {
+			if (bootstrap && !e.config.PoolEnabled) || !e.needsCollection(s, time.Now()) {
 				return
 			}
+		} else {
+			return
 		}
 	}
 	if attempts == 0 {
@@ -691,6 +705,8 @@ func (e *Engine) Status() map[string]any {
 		RejectedStatus       int               `json:"rejected_status,omitempty"`
 		RetryAfterSeconds    int               `json:"retry_after_seconds,omitempty"`
 		Nodes                []NodeObservation `json:"nodes"`
+		Cards                []turnstate.Card  `json:"states"`
+		Collection           CollectionStatus  `json:"collection"`
 		ActiveRoute          string            `json:"active_route,omitempty"`
 		UpstreamPauseSeconds int               `json:"upstream_pause_seconds,omitempty"`
 	}
@@ -733,7 +749,9 @@ func (e *Engine) Status() map[string]any {
 			nodes = append(nodes, node)
 		}
 		sort.Slice(nodes, func(i, j int) bool { return nodes[i].Route < nodes[j].Route })
-		states = append(states, sessionStatus{Nodes: nodes, ActiveRoute: activeRoute, UpstreamPauseSeconds: max(0, int(time.Until(s.upstreamPause).Seconds())+1), ID: s.id, Status: state, accountPolicy: s.policy, Model: s.model, Phase: phase, RejectedStatus: status, RetryAfterSeconds: retry, Diagnostic: s.diagnostic, DiagnosticMessage: diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks), ObservedBlocks: s.observedBlocks, ObservedLength: observedLength, CooldownSeconds: cooldown, LastProbe: s.lastProbe})
+		collection := e.collectionStatus(s, time.Now())
+		cooldown = max(cooldown, collection.WaitSeconds)
+		states = append(states, sessionStatus{Cards: e.cards(s, time.Now()), Collection: collection, Nodes: nodes, ActiveRoute: activeRoute, UpstreamPauseSeconds: max(0, int(time.Until(s.upstreamPause).Seconds())+1), ID: s.id, Status: state, accountPolicy: s.policy, Model: s.model, Phase: phase, RejectedStatus: status, RetryAfterSeconds: retry, Diagnostic: s.diagnostic, DiagnosticMessage: diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks), ObservedBlocks: s.observedBlocks, ObservedLength: observedLength, CooldownSeconds: cooldown, LastProbe: s.lastProbe})
 		s.mu.Unlock()
 	}
 	kind, reason := "official", "已开启注入；只有符合所选账号规则的 state 才会使用。长度是经验规则，不代表模型质量。"
@@ -818,6 +836,16 @@ func probeReason(err error) string {
 }
 func diagnosticMessage(code string, p accountPolicy, observed int) string {
 	switch code {
+	case "duplicate_state":
+		return "上游返回已持有的同一张 state，没有增加备用；按失败间隔等待后再补采。"
+	case "failure_interval":
+		return "上次补采未成功，按失败间隔等待后再试下一个节点。"
+	case "search_budget":
+		return "连续失败次数已达到预算，暂停一段时间后自动恢复；仍遵守每小时总预算。"
+	case "hourly_budget":
+		return "额外采集已达到全程序每小时预算，等待额度恢复；已有可用 state 仍可正常使用。"
+	case "budget_storage_error":
+		return "采集预算记录无法保存，已停止额外采集；已有可用 state 仍可正常使用。"
 	case "restored_backup":
 		return "已从本机私有备份恢复合格 state；出现失效响应时会立即切换备用牌。"
 	case "pool_exhausted":
@@ -835,7 +863,7 @@ func diagnosticMessage(code string, p accountPolicy, observed int) string {
 	case "model_capacity":
 		return "上游明确返回模型繁忙或容量不足。本轮已停止，不会靠更换出口继续尝试；可等待上游恢复，或由你手动选择其它可用模型。"
 	case "upstream_rate_limited":
-		return "上游在回复流中返回限流或额度不足，已按账号暂停；切换模型、出口或重新采集不会重置限制。"
+		return "上游对请求或补采限流；已暂停额外探测，仍合格的 state 继续按原来源节点使用。正式 AI 请求收到限流时才会暂停该账号。"
 	case "response_failed":
 		return "上游在 HTTP 200 回复流中明确报告失败，未采集该 state，本轮已停止；不是单纯没有收到结束事件。"
 	case "incomplete_response":
@@ -843,7 +871,7 @@ func diagnosticMessage(code string, p accountPolicy, observed int) string {
 	case "network_failed":
 		return "连接上游失败或超时；请检查代理和路由页面的连通性。"
 	case "upstream_rejected":
-		return "上游拒绝了探测请求；请查看状态码，401 / 403 / 429 不会通过更换出口继续尝试。"
+		return "上游拒绝了探测请求；401 / 403 会暂停该账号，429 只暂停补采，不会清除或阻断仍合格的 state。"
 	default:
 		return "尚无采集结果。收到该模型请求后才会开始连续采集。"
 	}
@@ -902,7 +930,7 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...s
 		seconds := max(1, int(time.Until(s.nextProbe).Seconds())+1)
 		s.mu.Unlock()
 		e.mu.Unlock()
-		return fmt.Errorf("上次采集成功，%d 秒内无需重复探测；发现不匹配会立即恢复采集", seconds)
+		return fmt.Errorf("尚未到下次采集时间，请等待 %d 秒；手动采集也遵守失败间隔和总预算", seconds)
 	}
 	if _, usable := s.state.Acquire(time.Now()); usable && len(routeIDs) == 0 {
 		s.mu.Unlock()

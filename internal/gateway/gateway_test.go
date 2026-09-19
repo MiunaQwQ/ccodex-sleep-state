@@ -121,12 +121,12 @@ func TestQuotaFailureStopsProbeRoundAndCooldown(t *testing.T) {
 			for i := 0; i < 2; i++ {
 				w := httptest.NewRecorder()
 				e.ServeHTTP(w, request(generation, "synthetic-account-token"))
-				if w.Code != status {
-					t.Fatalf("status=%d", w.Code)
+				if w.Code != 503 {
+					t.Fatalf("probe failure must stay local: status=%d", w.Code)
 				}
 			}
 			if calls.Load() != 1 {
-				t.Fatalf("quota/auth rejection retried %d times", calls.Load())
+				t.Fatalf("probe failure retried %d times", calls.Load())
 			}
 		})
 	}
@@ -459,6 +459,20 @@ func TestDefaultBaselineSkipsMismatchedRouteAndBindsGoodRoute(t *testing.T) {
 	}}
 	e.routes = append(e.routes, proxyroute.Route{ID: "good-route", Transport: tr})
 	w := httptest.NewRecorder()
+	e.ServeHTTP(w, request(generation, "synthetic-account-token"))
+	if w.Code != 503 || badCalls.Load() != 1 || goodCalls.Load() != 0 {
+		t.Fatal("first failure must wait before next egress")
+	}
+	for _, s := range e.sessions {
+		// Advance the persisted backoff gate without sleeping in the transport test.
+		e.collection.mu.Lock()
+		entry := e.collection.doc.Searches[s.backupKey]
+		entry.Until = time.Now().Add(-time.Second)
+		e.collection.doc.Searches[s.backupKey] = entry
+		e.collection.mu.Unlock()
+		s.nextProbe = time.Time{}
+	}
+	w = httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "synthetic-account-token"))
 	if w.Code != 200 || badCalls.Load() != 1 || goodCalls.Load() != 2 {
 		t.Fatalf("wrong selection: status=%d bad=%d good=%d", w.Code, badCalls.Load(), goodCalls.Load())

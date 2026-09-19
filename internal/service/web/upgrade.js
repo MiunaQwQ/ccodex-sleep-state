@@ -9,7 +9,7 @@ function renderUpgrade(s){
  else if(!s.configured_codex && !s.configuration_writable){title="当前是只读启动，尚未自动接入";help="请使用正常启动入口接入 Codex；本次启动不会改你的配置。可先点下方一键检测环境配置。";nextPage="overview";nextFocus="environment-check";}
  else if(!s.configured_codex){title="服务已启动，还没接上 Codex";help="点“一键接入 Codex”；看到已接管后，重启 Codex 并新建对话。";nextPage="overview";nextFocus="quick-setup";}
  else if(s.sessions?.some(x=>x.phase==="rate_limited"||x.phase==="auth_blocked")){title="上游要求先暂停";help="限流请等待；登录/权限错误请回 Codex 或服务商处理。换节点和反复重试不会解除它。";}
- else if(s.sessions?.some(x=>x.phase==="waiting_for_state")){title="还没拿到符合规则的值";help="先检查代理连接，再到代理池选择一个节点点“只试这个节点”。失败不冷却；可以到节点池测试延迟和调整候选。";nextPage="pool";}
+ else if(s.sessions?.some(x=>x.phase==="waiting_for_state")){title="还没拿到符合规则的值";help="先检查代理连接，再到代理池选择一个节点点“只试这个节点”。失败按间隔与预算自动重试；可以到节点池测试延迟和调整候选。";nextPage="pool";}
  $("next-step-title").textContent=title;$("next-step-help").textContent=help;$("next-step-action").textContent=nextPage==="overview"&&!nextFocus?"查看会话":"带我去处理";
 
  if(!advancedDirty && s.advanced){
@@ -36,7 +36,7 @@ $("save-state-policy").addEventListener("click",()=>action(async()=>{
  const revision=policyRevision;const r=await api("state-policy",{mode:$("state-policy").value});if(revision===policyRevision)policyDirty=false;$("state-policy-result").textContent=r.message;await refresh();
 }));
 $("advanced-form").addEventListener("input",()=>{advancedDirty=true;advancedRevision++;});
-$("pool-preset").addEventListener("click",()=>{advancedDirty=true;advancedRevision++;$("egress-mode").value="random";$("pool-enabled").checked=true;notice("已填入；保存后才生效。独立随机至少需要两个不同节点，耗尽后请手动回收。");});
+$("pool-preset").addEventListener("click",()=>{advancedDirty=true;advancedRevision++;$("egress-mode").value="state";$("pool-enabled").checked=true;notice("已填入；保存后才生效。携带 state 的请求将固定在该 state 的来源节点。");});
 $("advanced-form").addEventListener("submit",event=>{event.preventDefault();action(async()=>{
  if(!confirm("保存会清空 state 缓存，但保留节点已用/失败记录。更大的请求限制会占更多内存；跨出口使用 state 可能被上游拒绝。继续？"))return;
  const body=Object.fromEntries(Object.entries(advancedFields).map(([key,id])=>[key,Number($(id).value)]));
@@ -59,7 +59,7 @@ function renderPool(){
   const retry=textNode("button","只试这个节点","secondary");retry.disabled=row.state==="disabled";retry.dataset.locked=String(retry.disabled);
   retry.addEventListener("click",()=>action(async()=>{
    const id=$("pool-session").value;if(!id){notice("先在 Codex 发一条消息并刷新，然后选择会话。不会自动读取账号文件。");return;}
-   if(!confirm("使用所选会话的凭据，在此节点发送一次短模型探测，可能消耗额度。成功后有采集间隔，失败不增加冷却；仍遵守上游暂停。继续？"))return;
+   if(!confirm("使用所选会话的凭据，在此节点发送一次短模型探测，可能消耗额度。成功后有采集间隔，失败遵守退避间隔与总预算；仍遵守上游暂停。继续？"))return;
    try{const r=await api("state/retry",{id,route_id:row.id});$("pool-result").textContent=r.message;}
    finally{await refresh();await loadLifecyclePool();}
   }));box.append(retry);$("pool-list").append(box);

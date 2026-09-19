@@ -50,6 +50,8 @@ func TestContinuousSearchCrossesBatchesAndStopsOnSuccess(t *testing.T) {
 	}))
 	e.log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	e.config.MaxProbes = 1
+	e.config.Collection.FailureIntervalSeconds = 0
+	e.config.Collection.FailureMaxIntervalSeconds = 0
 	e.config.CooldownSeconds = 180
 	runCollector(t, e)
 	s, err := e.borrow(request(generation, "continuous-account").Header)
@@ -138,6 +140,9 @@ func TestConcurrentColdRequestsShareCollector(t *testing.T) {
 		}
 	}))
 	e.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Scheduling delays are covered with a controlled clock in collection_budget_test.go.
+	e.config.Collection.FailureIntervalSeconds = 0
+	e.config.Collection.FailureMaxIntervalSeconds = 0
 	runCollector(t, e)
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
@@ -163,6 +168,8 @@ func TestFailedRouteMovesToNextSelectedRoute(t *testing.T) {
 	cfg := settings.Default()
 	cfg.Upstream = "http://127.0.0.1:12345/backend-api/codex"
 	cfg.MaxProbes = 1
+	cfg.Collection.FailureIntervalSeconds = 0
+	cfg.Collection.FailureMaxIntervalSeconds = 0
 	e := New(cfg, []proxyroute.Route{route("bad", bad.URL), route("good", good.URL)}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer e.Close()
 	runCollector(t, e)
@@ -193,7 +200,7 @@ func TestContinuousCollectorStopsForAccountLimit(t *testing.T) {
 	s.mu.Unlock()
 	release(s)
 	e.signal()
-	await(t, func() bool { status, _ := s.rejection(); return status == 429 })
+	await(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return time.Now().Before(s.upstreamPause) })
 	for i := 0; i < 20; i++ {
 		e.signal()
 	}
