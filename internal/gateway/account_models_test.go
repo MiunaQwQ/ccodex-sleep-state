@@ -157,6 +157,28 @@ func TestRejectionSurvivesModelSwitch(t *testing.T) {
 	}
 }
 
+func TestFailedFiveSixProbeDoesNotBlockAstraState(t *testing.T) {
+	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "gpt-5.6-sol") && r.Header.Get(turnstate.Header) == "" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		complete(w, fakeToken(10, 99))
+	}))
+	five := strings.ReplaceAll(generation, settings.Model, "gpt-5.6-sol")
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, request(five, "isolated-model-probe"))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed 5.6 probe should remain local, status=%d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	e.ServeHTTP(w, request(generation, "isolated-model-probe"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("5.6 probe polluted astra session, status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestCompactionDoesNotDependOnCollection(t *testing.T) {
 	var calls atomic.Int32
 	body := `{"model":"gpt-5.6-terra","input":[],"instructions":"compact"}`
