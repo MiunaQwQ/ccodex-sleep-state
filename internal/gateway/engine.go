@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
+	"github.com/gylive/ccodex-sleep-state/internal/routepool"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 	"github.com/gylive/ccodex-sleep-state/internal/turnstate"
 )
@@ -53,6 +54,9 @@ type session struct {
 }
 
 type Engine struct {
+	onDemand       atomic.Bool
+	pool           *routepool.Store
+	bodySlots      chan struct{}
 	requests       atomic.Uint64
 	lastRequest    atomic.Int64
 	injectionEpoch atomic.Uint64
@@ -66,8 +70,14 @@ type Engine struct {
 	probeSlot      chan struct{}
 }
 
-func New(c settings.Config, routes []proxyroute.Route, logger *slog.Logger) *Engine {
+func New(c settings.Config, routes []proxyroute.Route, logger *slog.Logger, pools ...*routepool.Store) *Engine {
 	e := &Engine{config: c, routes: routes, log: logger, sessions: make(map[string]*session), limits: make(map[string]*credentialLimit), probeSlot: make(chan struct{}, 1)}
+	e.pool, _ = routepool.Open("")
+	if len(pools) > 0 && pools[0] != nil {
+		e.pool = pools[0]
+	}
+	e.bodySlots = make(chan struct{}, 4)
+	e.onDemand.Store(c.StateRefreshMode == "on_demand")
 	e.disabled.Store(c.InjectionDisabled || c.IsRelay())
 	return e
 }
@@ -135,6 +145,7 @@ func (e *Engine) borrow(h http.Header, models ...string) (*session, error) {
 		}
 		policy := policyFor(e.config, h)
 		s = &session{id: rand.Text(), model: model, policy: policy, limit: limit, headers: safe, state: turnstate.New(turnstate.Policy{Blocks: policy.Blocks, TTL: time.Duration(e.config.TTLSeconds) * time.Second, Refresh: time.Duration(e.config.RefreshSeconds) * time.Second})}
+		s.state.HoldActive(e.onDemand.Load())
 		e.sessions[key] = s
 	}
 	s.mu.Lock()
@@ -160,7 +171,7 @@ func (e *Engine) Run(ctx context.Context) {
 			}
 			work := e.backgroundWork(now)
 			for _, s := range work {
-				if s.state.NeedsRefresh(now) || (len(e.routes) > 1 && !s.state.Status(now).Ready) {
+				if (e.onDemand.Load() && !s.state.Status(now).Usable) || (!e.onDemand.Load() && (s.state.NeedsRefresh(now) || !s.state.Status(now).Ready)) {
 					e.refresh(ctx, s, false)
 				}
 				release(s)
@@ -191,9 +202,9 @@ func (e *Engine) backgroundWork(now time.Time) []*session {
 	return work
 }
 
-func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool) {
+func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only ...int) {
 	epoch := e.injectionEpoch.Load()
-	if e.disabled.Load() {
+	if e.disabled.Load() || e.pool.Err() != nil {
 		return
 	}
 	s.mu.Lock()
@@ -243,7 +254,12 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool) {
 		}
 		limit = 1
 	}
-	for i := 0; i < limit; i++ {
+	if len(only) > 0 {
+		pinned = only[0]
+		limit = 1
+	}
+	attempts := 0
+	for i := 0; i < len(e.routes) && attempts < limit; i++ {
 		if ctx.Err() != nil || e.disabled.Load() || e.injectionEpoch.Load() != epoch {
 			return
 		}
@@ -258,6 +274,22 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool) {
 		if pinned >= 0 {
 			route = pinned
 		}
+		entry := e.pool.Get(e.routes[route].ID)
+		if e.config.PoolEnabled && len(only) == 0 && entry.State != "available" {
+			continue
+		}
+		if entry.State == "disabled" {
+			continue
+		}
+		if e.config.PoolEnabled {
+			if err := e.pool.ClaimProbe(e.routes[route].ID, len(only) > 0); err != nil {
+				if e.pool.Err() != nil {
+					return
+				}
+				continue
+			}
+		}
+		attempts++
 		token, status, retryAfter, err := e.probe(ctx, s.headers, e.routes[route], s.model)
 		accepted := false
 		if err == nil && !e.disabled.Load() && e.injectionEpoch.Load() == epoch {
@@ -274,6 +306,23 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool) {
 				result = "state_time_rejected"
 			}
 		}
+		// Record upstream decisions before persistence: disk failure must not
+		// discard a 401/403/429 stop or allow a later node to retry it.
+		rejectionStatus := status
+		var streamFailure *probeStreamError
+		if errors.As(err, &streamFailure) && streamFailure.status != 0 {
+			rejectionStatus = streamFailure.status
+		}
+		rejected := e.reject(s, rejectionStatus, retryAfter, route)
+		if e.config.PoolEnabled {
+			poolState := "failed"
+			if accepted {
+				poolState = "used"
+			}
+			if err := e.pool.Change([]string{e.routes[route].ID}, poolState, result, false); err != nil {
+				return
+			}
+		}
 		s.mu.Lock()
 		s.diagnostic, s.observedBlocks, s.lastProbe = result, token.Blocks, time.Now()
 		s.mu.Unlock()
@@ -283,12 +332,7 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool) {
 			"expected_blocks", s.policy.Blocks, "model", s.model)
 		// Preserve upstream account limits rather than converting them to a
 		// generic "no state" error or moving on to another egress.
-		rejectionStatus := status
-		var streamFailure *probeStreamError
-		if errors.As(err, &streamFailure) && streamFailure.status != 0 {
-			rejectionStatus = streamFailure.status
-		}
-		if e.reject(s, rejectionStatus, retryAfter, route) {
+		if rejected {
 			return
 		}
 		// A completed error event is an upstream decision, not a reason to gamble
@@ -298,10 +342,15 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool) {
 		}
 		if accepted {
 			successes++
-			if bootstrap || successes >= 2 || s.state.Status(time.Now()).Ready {
+			if bootstrap || e.onDemand.Load() || successes >= 2 || s.state.Status(time.Now()).Ready {
 				return
 			}
 		}
+	}
+	if attempts == 0 {
+		s.mu.Lock()
+		s.diagnostic = "pool_exhausted"
+		s.mu.Unlock()
 	}
 }
 
@@ -605,6 +654,8 @@ func probeReason(err error) string {
 }
 func diagnosticMessage(code string, p accountPolicy, observed int) string {
 	switch code {
+	case "pool_exhausted":
+		return "可用节点已耗尽。请到代理池补充节点，或选择已用/失败清单手动放回；不会自动重复使用。"
 	case "accepted":
 		return "已采到符合当前规则的 state；这不等于验证了模型质量。"
 	case "shape_mismatch":
@@ -640,7 +691,7 @@ func (s *session) unavailableMessage() (string, int) {
 
 // RetryState is a bounded manual retry of an existing RAM-only session. The
 // panel never supplies credentials, clears a usable state, or resets a limit.
-func (e *Engine) RetryState(ctx context.Context, sessionID string) error {
+func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...string) error {
 	if e.disabled.Load() {
 		return errors.New("请先开启注入；普通转发模式不采集 state")
 	}
@@ -687,7 +738,7 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string) error {
 		e.mu.Unlock()
 		return fmt.Errorf("探测仍在冷却，请 %d 秒后重试；按钮不会跳过冷却", seconds)
 	}
-	if _, usable := s.state.Acquire(time.Now()); usable {
+	if _, usable := s.state.Acquire(time.Now()); usable && len(routeIDs) == 0 {
 		s.mu.Unlock()
 		e.mu.Unlock()
 		return errors.New("当前 state 仍可用，无需重复采集；不会清除正在使用的状态")
@@ -696,16 +747,55 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string) error {
 	s.mu.Unlock()
 	e.mu.Unlock()
 	defer release(s)
-	e.refresh(ctx, s, true)
+	if len(routeIDs) > 0 && routeIDs[0] != "" {
+		index := -1
+		for i, r := range e.routes {
+			if r.ID == routeIDs[0] {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return errors.New("节点已不存在，请刷新代理池")
+		}
+		if e.pool.Get(routeIDs[0]).State == "disabled" {
+			return errors.New("请先将已清理节点放回可用池")
+		}
+		e.refresh(ctx, s, false, index)
+	} else {
+		e.refresh(ctx, s, true)
+	}
+	if e.pool.Err() != nil {
+		return e.pool.Err()
+	}
+
 	if ctx.Err() != nil {
 		return errors.New("本轮采集已取消或超时，请等待冷却后重试")
 	}
 	if status, _ := s.rejection(); status != 0 {
 		return fmt.Errorf("采集遇到上游 %d，已停止；请查看会话状态", status)
 	}
+	if len(routeIDs) > 0 {
+		s.mu.Lock()
+		diagnostic := s.diagnostic
+		s.mu.Unlock()
+		if diagnostic != "accepted" {
+			return fmt.Errorf("单节点采集未成功：%s；已有主用 state 保留", diagnostic)
+		}
+	}
 	if _, usable := s.state.Acquire(time.Now()); usable {
 		return nil
 	}
 	message, _ := s.unavailableMessage()
 	return errors.New(message)
+}
+
+func (e *Engine) SetRefreshMode(mode string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	hold := mode == "on_demand"
+	e.onDemand.Store(hold)
+	for _, s := range e.sessions {
+		s.state.HoldActive(hold)
+	}
 }

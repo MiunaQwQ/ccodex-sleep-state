@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -23,6 +24,9 @@ func (e *compactError) Error() string { return e.code }
 // official Codex rust-v0.154.0 codex-api/src/common.rs. Add only the Responses
 // envelope and the protocol trigger; never synthesize a summary or ciphertext.
 func bridgeCompactRequest(body []byte) ([]byte, error) {
+	return bridgeCompactRequestLimit(body, maxRequestBytes)
+}
+func bridgeCompactRequestLimit(body []byte, limit int64) ([]byte, error) {
 	var request map[string]json.RawMessage
 	if json.Unmarshal(body, &request) != nil || request == nil {
 		return nil, errors.New("远程压缩需要 JSON 对象")
@@ -45,8 +49,8 @@ func bridgeCompactRequest(body []byte) ([]byte, error) {
 		request["include"] = json.RawMessage(`["reasoning.encrypted_content"]`)
 	}
 	encoded, err := json.Marshal(request)
-	if err != nil || len(encoded) > maxRequestBytes {
-		return nil, errors.New("转换后的压缩请求超过 16 MiB 限制")
+	if err != nil || int64(len(encoded)) > limit {
+		return nil, fmt.Errorf("转换后的压缩请求超过 %d MiB 限制", limit>>20)
 	}
 	return encoded, nil
 }
@@ -55,9 +59,9 @@ func bridgeCompactRequest(body []byte) ([]byte, error) {
 // returning the legacy JSON envelope. Errors never become fabricated success.
 func (e *Engine) bridgeCompactResponse(resp *http.Response, s *session, route int) error {
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCompactBytes+1))
-	if len(data) > maxCompactBytes {
-		return &compactError{502, "compact_response_too_large", "远程压缩回复超过 16 MiB 限制；请求不会重放。"}
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, e.config.CompactBytes()+1))
+	if int64(len(data)) > e.config.CompactBytes() {
+		return &compactError{502, "compact_response_too_large", fmt.Sprintf("远程压缩回复超过 %d MiB 限制；请求不会重放。", e.config.CompactBytes()>>20)}
 	}
 	finished, streamErr := probeStreamOutcome(data)
 	if streamErr != nil {

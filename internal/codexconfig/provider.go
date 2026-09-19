@@ -104,7 +104,7 @@ func ResolveWithAuth(original []byte, profile, authMode string) (Selection, erro
 	}
 	if endpoint == "" {
 		if id != "openai" {
-			return Selection{}, errors.New("selected relay provider has no base_url")
+			return Selection{}, errors.New("所选中转 provider 缺少 base_url。请在连接设置中补全 Responses API 地址；不会猜测上游或将官方登录凭据发给中转")
 		}
 		endpoint = "https://chatgpt.com/backend-api/codex"
 		if authMode == "api_key" {

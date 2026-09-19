@@ -16,12 +16,14 @@ import (
 	"github.com/gylive/ccodex-sleep-state/internal/fsutil"
 	"github.com/gylive/ccodex-sleep-state/internal/gateway"
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
+	"github.com/gylive/ccodex-sleep-state/internal/routepool"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 )
 
 // control owns a whole route generation. Reconfiguration never mutates routes
 // under an active request, and never discards an account's upstream rejection.
 type control struct {
+	pool                  *routepool.Store
 	targetURL, targetKind string
 	authMode, codexHome   string
 
@@ -41,6 +43,16 @@ type control struct {
 }
 
 func (c *control) start(routes []proxyroute.Route) {
+	if c.pool == nil {
+		var err error
+		c.pool, err = routepool.Open(filepath.Join(c.dir, "pool-state.json"))
+		if err != nil {
+			closeRoutes(routes)
+			c.routeError = err.Error()
+			return
+		}
+	}
+
 	selected := routes
 	if c.config.PinnedRoute != "" {
 		selected = nil
@@ -59,7 +71,7 @@ func (c *control) start(routes []proxyroute.Route) {
 	ctx, cancel := context.WithCancel(c.ctx)
 	c.cancel, c.done = cancel, make(chan struct{})
 	effective := c.effective()
-	c.engine = gateway.New(effective, selected, c.log)
+	c.engine = gateway.New(effective, selected, c.log, c.pool)
 	engine, done := c.engine, c.done
 	go func() { defer close(done); engine.Run(ctx) }()
 	c.routeError = ""
@@ -230,6 +242,11 @@ func (c *control) status() map[string]any {
 	result["supported_models"] = settings.SupportedModels()
 	result["account_mode"] = c.config.AccountMode
 	result["state_fallback"] = c.config.StateFallback
+	result["state_refresh_mode"] = c.config.StateRefreshMode
+	result["advanced"] = advancedFrom(c.config)
+	if c.pool != nil && c.pool.Err() != nil {
+		result["pool_error"] = c.pool.Err().Error()
+	}
 	result["timing"] = timingFrom(c.config)
 	result["timing_defaults"] = timingFrom(settings.Default())
 	result["traffic"] = c.history.snapshot()

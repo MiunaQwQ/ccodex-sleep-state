@@ -2,6 +2,8 @@ package service
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"regexp"
 
 	"github.com/gylive/ccodex-sleep-state/internal/codexconfig"
@@ -73,5 +75,36 @@ func (c *control) rebuildConfig(v rebuildRequest) error {
 		return errors.New("无法生成新配置")
 	}
 	_, err = codexconfig.ResetConfig(c.dir, home, codexconfig.CleanConfigOptions{ExpectedConfigSHA256: v.SHA, ExpectedExists: v.Exists, Replacement: replacement, AuthMode: authMode})
+	return err
+}
+
+func (c *control) repairEndpoint(v rebuildRequest) error {
+	if !c.configure || c.managed {
+		return errors.New("仅在尚未接管时补全地址；运行中的连接请先停止，避免凭据送错上游")
+	}
+	home, err := c.config.CodexDir()
+	if err != nil {
+		return err
+	}
+	original, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		return err
+	}
+	auth, err := codexconfig.ReadAuthMode(home)
+	if err != nil {
+		return err
+	}
+	replacement, err := codexconfig.PatchMissingEndpoint(original, c.config.CodexProfile, v.Upstream, auth)
+	if err != nil {
+		return err
+	}
+	selection, err := codexconfig.ResolveWithAuth(replacement, c.config.CodexProfile, auth)
+	if err != nil {
+		return err
+	}
+	if selection.EnvKey != "" {
+		auth = "api_key"
+	}
+	_, err = codexconfig.ResetConfig(c.dir, home, codexconfig.CleanConfigOptions{ExpectedConfigSHA256: v.SHA, ExpectedExists: v.Exists, Replacement: replacement, AuthMode: auth})
 	return err
 }

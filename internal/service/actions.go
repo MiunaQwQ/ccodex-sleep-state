@@ -9,6 +9,7 @@ import (
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -30,32 +31,71 @@ func decode(w http.ResponseWriter, r *http.Request, v any) error {
 }
 
 type sourceRequest struct {
-	Mode      string   `json:"mode"`
-	Value     string   `json:"value"`
-	UserAgent string   `json:"user_agent"`
-	Exclude   []string `json:"exclude_keywords"`
-	Protocols []string `json:"include_protocols"`
+	EnablePool bool     `json:"enable_pool"`
+	Append     bool     `json:"append"`
+	Mode       string   `json:"mode"`
+	Value      string   `json:"value"`
+	UserAgent  string   `json:"user_agent"`
+	Exclude    []string `json:"exclude_keywords"`
+	Protocols  []string `json:"include_protocols"`
 }
 
 func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 	next := c.config
-	next.Direct = false
-	next.ProxyURLs = []string{}
-	next.ProxyEnvs = []string{}
-	next.Subscriptions = []settings.Source{}
-	next.PinnedRoute = ""
+	if !v.Append {
+		next.Direct = false
+		next.ProxyURLs = []string{}
+		next.ProxyEnvs = []string{}
+		next.Subscriptions = []settings.Source{}
+		next.PinnedRoute = ""
+		next.EgressRoute = ""
+		if next.EgressMode == "fixed" {
+			next.EgressMode = "random"
+		}
+	}
+	next.Subscriptions = append([]settings.Source(nil), next.Subscriptions...)
+	next.ProxyURLs = append([]string(nil), next.ProxyURLs...)
+	if v.EnablePool {
+		next.PoolEnabled = true
+		next.PinnedRoute = ""
+		if next.EgressMode != "fixed" {
+			next.EgressMode = "random"
+		}
+	}
 	source := settings.Source{UserAgent: v.UserAgent, ExcludeKeywords: v.Exclude, IncludeProtocols: v.Protocols}
 	switch v.Mode {
 	case "direct":
 		next.Direct = true
 	case "proxy":
-		next.ProxyURLs = []string{v.Value}
+		next.ProxyURLs = append(next.ProxyURLs, v.Value)
 	case "subscription":
 		source.URL = v.Value
-		next.Subscriptions = []settings.Source{source}
+		next.Subscriptions = append(next.Subscriptions, source)
+	case "subscription-list":
+		seen := map[string]bool{}
+		for _, existing := range next.Subscriptions {
+			seen[existing.URL] = true
+		}
+		count := 0
+		for _, line := range strings.Split(strings.TrimPrefix(v.Value, "\ufeff"), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			count++
+			if !seen[line] {
+				entry := source
+				entry.URL = line
+				next.Subscriptions = append(next.Subscriptions, entry)
+				seen[line] = true
+			}
+		}
+		if count == 0 {
+			return next, errors.New("订阅列表为空，请每行填写一个 HTTPS 订阅链接")
+		}
 	case "file":
 		source.File = v.Value
-		next.Subscriptions = []settings.Source{source}
+		next.Subscriptions = append(next.Subscriptions, source)
 	default:
 		return next, errors.New("请选择直连、本地代理、订阅链接或本地订阅文件")
 	}
@@ -75,6 +115,10 @@ func routeList(routes []proxyroute.Route) []map[string]any {
 }
 
 func (c *control) api(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/admin/api/environment-check" && r.Method == "GET" {
+		reply(w, 200, c.environmentCheck())
+		return
+	}
 	if r.URL.Path == "/admin/api/status" && r.Method == "GET" {
 		reply(w, 200, c.status())
 		return
@@ -98,6 +142,78 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
 	switch r.URL.Path {
+	case "/admin/api/advanced", "/admin/api/pool", "/admin/api/pool/change":
+		c.poolAPI(w, r, ctx)
+		return
+
+	case "/admin/api/state-policy":
+		var v struct {
+			Mode string `json:"mode"`
+		}
+		if err := decode(w, r, &v); err != nil {
+			fail(err)
+			return
+		}
+		if v.Mode != "standby" && v.Mode != "on_demand" {
+			fail(errors.New("请选择主备或固定主用模式"))
+			return
+		}
+		next := c.config
+		next.StateRefreshMode = v.Mode
+		if err := c.persist(next); err != nil {
+			fail(err)
+			return
+		}
+		c.config = next
+		if c.engine != nil {
+			c.engine.SetRefreshMode(v.Mode)
+		}
+		reply(w, 200, map[string]string{"message": "策略已保存，现有主用/备用 state 保留，不重置冷却或上游限流。固定主用仍会在到期或检测到形状不符时重新采集。"})
+	case "/admin/api/relay-models":
+		var v struct {
+			Base string `json:"base_url"`
+			Key  string `json:"api_key"`
+		}
+		if err := decode(w, r, &v); err != nil {
+			fail(err)
+			return
+		}
+		result, err := relayModels(ctx, v.Base, v.Key)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(w, 200, result)
+	case "/admin/api/relay-repair":
+		var v rebuildRequest
+		if err := decode(w, r, &v); err != nil {
+			fail(err)
+			return
+		}
+		c.pause()
+		defer c.resume()
+		if c.engine != nil && c.engine.Restricted() {
+			fail(errors.New("上游拒绝/限流未解除，请先处理账号状态"))
+			return
+		}
+		if err := c.repairEndpoint(v); err != nil {
+			fail(err)
+			return
+		}
+		c.stop()
+		c.setup()
+		if c.setupError != "" {
+			fail(errors.New(c.setupError))
+			return
+		}
+		routes, err := proxyroute.Load(ctx, c.config)
+		if err != nil {
+			c.routeError = err.Error()
+			fail(err)
+			return
+		}
+		c.start(routes)
+		reply(w, 200, map[string]string{"message": "缺失地址已补全并备份，其它配置保留。请重启 Codex；中转只做 Responses 转发，不采集官方 state。"})
 	case "/admin/api/quick-setup":
 		if err := c.quickSetup(ctx); err != nil {
 			fail(err)
@@ -106,7 +222,8 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, map[string]string{"message": "本机配置已备份并接入，尚未验证外网或模型。请重启 Codex 并发一条消息；采不到合格 state 时先普通转发。"})
 	case "/admin/api/state/retry":
 		var v struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			RouteID string `json:"route_id,omitempty"`
 		}
 		if err := decode(w, r, &v); err != nil {
 			fail(err)
@@ -120,7 +237,13 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("Codex 配置已改变，请先检查与修复配置"))
 			return
 		}
-		if err := c.engine.RetryState(ctx, v.ID); err != nil {
+		var err error
+		if v.RouteID != "" {
+			err = c.engine.RetryState(ctx, v.ID, v.RouteID)
+		} else {
+			err = c.engine.RetryState(ctx, v.ID)
+		}
+		if err != nil {
 			fail(err)
 			return
 		}
@@ -330,6 +453,25 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			reply(w, 200, map[string]any{"message": "订阅获取、解析和出站配置构建通过。尚未连接出口，也没有发送模型请求。", "routes": routeList(routes)})
 			return
 		}
+		// Appending sources can still remove a previously selected node when a
+		// remote subscription changed. Never publish a broken fixed route.
+		for _, id := range []string{next.PinnedRoute, next.EgressRoute} {
+			if id == "" {
+				continue
+			}
+			found := false
+			for _, route := range routes {
+				if route.ID == id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				closeRoutes(routes)
+				fail(errors.New("固定出口已不在订阅中，未保存新配置。请先选择其他出口或恢复自动选择"))
+				return
+			}
+		}
 		c.pause()
 		defer c.resume()
 		if c.engine != nil && c.engine.Restricted() {
@@ -406,6 +548,9 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		}
 		next := c.config
 		next.PinnedRoute = v.ID
+		// This legacy action pins the whole route set. Mixing it with an
+		// independent random/fixed exit would leave no matching candidate.
+		next.EgressMode, next.EgressRoute = "state", ""
 		if err = c.persist(next); err != nil {
 			closeRoutes(routes)
 			fail(err)
@@ -418,7 +563,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("配置已保存，但固定出口已失效。请在路由页恢复自动选择。"))
 			return
 		}
-		reply(w, 200, map[string]string{"message": "路由已切换，旧 state 已清空。"})
+		reply(w, 200, map[string]string{"message": "路由已切换为采集同出口模式，旧 state 已清空。要分开采集与正式出口，请使用连接设置里的独立出口设置。"})
 	case "/admin/api/recover":
 		if !c.configure {
 			fail(errors.New("当前使用 --no-config 只读启动。请停止服务后使用 setup 启动，再接管配置；本次没有修改任何文件。"))

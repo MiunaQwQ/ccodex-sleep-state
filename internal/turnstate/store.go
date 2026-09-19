@@ -14,6 +14,7 @@ type Snapshot struct {
 // Store has one publisher. Response observations cannot mutate active state.
 // Snapshot values are immutable; a request never rereads them halfway through.
 type Store struct {
+	holdActive    bool
 	mu            sync.Mutex
 	policy        Policy
 	active, ready Snapshot
@@ -32,7 +33,7 @@ func (s *Store) Acquire(now time.Time) (Snapshot, bool) {
 func (s *Store) promote(now time.Time) {
 	a, r := s.active, s.ready
 	if s.policy.Accept(r.Token, now) && r.Token.Fingerprint != a.Token.Fingerprint &&
-		(!s.policy.Accept(a.Token, now) || s.strikes >= 2 || (now.Add(s.policy.Refresh).After(a.Token.Issued.Add(s.policy.TTL)) && r.Token.Issued.After(a.Token.Issued))) {
+		(!s.policy.Accept(a.Token, now) || s.strikes >= 2 || (!s.holdActive && now.Add(s.policy.Refresh).After(a.Token.Issued.Add(s.policy.TTL)) && r.Token.Issued.After(a.Token.Issued))) {
 		s.version++
 		r.Version = s.version
 		s.active = r
@@ -105,3 +106,19 @@ func (s *Store) Status(now time.Time) Status {
 	}
 	return Status{s.policy.Accept(s.active.Token, now), s.active.Version, left, s.policy.Accept(s.ready.Token, now), s.strikes, s.candidates}
 }
+
+// RejectAndPromote changes only future admissions. In-flight snapshots remain
+// immutable and a stale response cannot invalidate a newer active state.
+func (s *Store) RejectAndPromote(used Snapshot, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if used.Version != s.active.Version || used.Token.Fingerprint != s.active.Token.Fingerprint {
+		return false
+	}
+	s.active = Snapshot{}
+	s.strikes = 0
+	s.promote(now)
+	return s.policy.Accept(s.active.Token, now)
+}
+
+func (s *Store) HoldActive(hold bool) { s.mu.Lock(); defer s.mu.Unlock(); s.holdActive = hold }

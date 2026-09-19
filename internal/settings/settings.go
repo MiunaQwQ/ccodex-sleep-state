@@ -27,6 +27,15 @@ type Source struct {
 }
 
 type Config struct {
+	ExternalProxyOnly bool   `json:"external_proxy_only,omitempty"`
+	StateRefreshMode  string `json:"state_refresh_mode,omitempty"`
+	RequestLimitMiB   int    `json:"request_limit_mib,omitempty"`
+	ZstdWindowMiB     int    `json:"zstd_window_mib,omitempty"`
+	CompactLimitMiB   int    `json:"compact_limit_mib,omitempty"`
+	EgressMode        string `json:"egress_mode,omitempty"`
+	EgressRoute       string `json:"egress_route,omitempty"`
+	PoolEnabled       bool   `json:"pool_enabled,omitempty"`
+
 	StateFallback        string   `json:"state_fallback,omitempty"`
 	Model                string   `json:"model,omitempty"`
 	AccountMode          string   `json:"account_mode,omitempty"`
@@ -52,13 +61,15 @@ type Config struct {
 }
 
 func Default() Config {
-	return Config{Model: Model, AccountMode: "auto", UpstreamKind: "official", Listen: "127.0.0.1:17841", Upstream: "https://chatgpt.com/backend-api/codex", Direct: true,
+	return Config{StateRefreshMode: "on_demand", RequestLimitMiB: 64, ZstdWindowMiB: 64, CompactLimitMiB: 64, EgressMode: "state", Model: Model, AccountMode: "auto", UpstreamKind: "official", Listen: "127.0.0.1:17841", Upstream: "https://chatgpt.com/backend-api/codex", Direct: true,
 		ProxyURLs: []string{}, ProxyEnvs: []string{}, Subscriptions: []Source{}, ProbeSeconds: 20,
 		RefreshSeconds: 1200, CooldownSeconds: 180, MaxProbes: 6, TTLSeconds: 3600, BaselineBlocks: 10}
 }
 
 func Load(path string) (Config, error) {
 	c := Default()
+	// Existing files without this field retain the previous standby behavior.
+	c.StateRefreshMode = "standby"
 	f, err := os.Open(path)
 	if err != nil {
 		return c, errors.New("cannot open service config; run init first")
@@ -77,6 +88,22 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.StateRefreshMode != "" && c.StateRefreshMode != "standby" && c.StateRefreshMode != "on_demand" {
+		return errors.New("state 策略必须为 standby 或 on_demand")
+	}
+
+	for _, n := range []int{c.RequestLimitMiB, c.ZstdWindowMiB, c.CompactLimitMiB} {
+		if n != 0 && (n < 16 || n > 128) {
+			return errors.New("请求/解压窗口/压缩回复上限必须是 16–128 MiB")
+		}
+	}
+	if c.EgressMode != "" && c.EgressMode != "state" && c.EgressMode != "random" && c.EgressMode != "fixed" {
+		return errors.New("出口模式必须为 state、random 或 fixed")
+	}
+	if c.EgressMode == "fixed" && c.EgressRoute == "" {
+		return errors.New("固定出口需要选择一个节点")
+	}
+
 	if c.StateFallback != "" && c.StateFallback != "strict" && c.StateFallback != "passthrough" {
 		return errors.New("state_fallback must be strict or passthrough")
 	}
@@ -186,3 +213,22 @@ func SupportedModel(model string) bool {
 	return false
 }
 func SupportedModels() []string { return []string{Model, "gpt-5.6-sol", "gpt-5.6-terra"} }
+
+func (c Config) RequestBytes() int64 {
+	if c.RequestLimitMiB == 0 {
+		return 64 << 20
+	}
+	return int64(c.RequestLimitMiB) << 20
+}
+func (c Config) WindowBytes() uint64 {
+	if c.ZstdWindowMiB == 0 {
+		return 64 << 20
+	}
+	return uint64(c.ZstdWindowMiB) << 20
+}
+func (c Config) CompactBytes() int64 {
+	if c.CompactLimitMiB == 0 {
+		return 64 << 20
+	}
+	return int64(c.CompactLimitMiB) << 20
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +16,9 @@ import (
 // clients send zstd; rejecting every compressed request breaks that client even
 // when the same configuration works with an API-key test fixture.
 func requestBody(r *http.Request) ([]byte, int, error) {
+	return requestBodyWithLimits(r, maxRequestBytes, maxRequestBytes)
+}
+func requestBodyWithLimits(r *http.Request, limit int64, window uint64) ([]byte, int, error) {
 	defer r.Body.Close()
 	encoding := strings.ToLower(strings.TrimSpace(strings.Join(r.Header.Values("Content-Encoding"), ",")))
 	switch encoding {
@@ -22,9 +26,9 @@ func requestBody(r *http.Request) ([]byte, int, error) {
 	default:
 		return nil, http.StatusUnsupportedMediaType, errors.New("支持未压缩 JSON、gzip 或 zstd；不支持多层编码")
 	}
-	wire, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes+1))
-	if len(wire) > maxRequestBytes {
-		return nil, http.StatusRequestEntityTooLarge, errors.New("压缩前请求体超过 16 MiB 限制")
+	wire, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if int64(len(wire)) > limit {
+		return nil, http.StatusRequestEntityTooLarge, fmt.Errorf("传入请求体超过 %d MiB；请在连接设置中调整请求上限，或缩小上下文", limit>>20)
 	}
 	if err != nil {
 		return nil, http.StatusBadRequest, errors.New("无法完整读取请求体")
@@ -39,7 +43,7 @@ func requestBody(r *http.Request) ([]byte, int, error) {
 		defer decoder.Close()
 		reader = decoder
 	case "zstd":
-		decoder, err := zstd.NewReader(reader, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(maxRequestBytes), zstd.WithDecoderMaxWindow(maxRequestBytes))
+		decoder, err := zstd.NewReader(reader, zstd.WithDecoderConcurrency(1), zstd.WithDecoderLowmem(true), zstd.WithDecoderMaxMemory(max(uint64(limit), window)), zstd.WithDecoderMaxWindow(window))
 		if err != nil {
 			return nil, http.StatusBadRequest, errors.New("zstd 请求体损坏或不完整")
 		}
@@ -48,9 +52,9 @@ func requestBody(r *http.Request) ([]byte, int, error) {
 	default:
 		return wire, 0, nil
 	}
-	body, err := io.ReadAll(io.LimitReader(reader, maxRequestBytes+1))
-	if len(body) > maxRequestBytes || errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) {
-		return nil, http.StatusRequestEntityTooLarge, errors.New("解压后的请求体或 zstd 窗口超过 16 MiB 限制")
+	body, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if int64(len(body)) > limit || errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) {
+		return nil, http.StatusRequestEntityTooLarge, fmt.Errorf("解压请求体或 zstd 窗口超过限制（请求 %d MiB / 窗口 %d MiB）；请在连接设置调整，正式请求尚未转发", limit>>20, window>>20)
 	}
 	if err != nil {
 		return nil, http.StatusBadRequest, errors.New("压缩请求体损坏或不完整")

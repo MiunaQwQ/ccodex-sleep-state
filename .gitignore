@@ -14,3 +14,5 @@
 /logs/
 /state/
 /subscriptions*
+
+/apikey.txt

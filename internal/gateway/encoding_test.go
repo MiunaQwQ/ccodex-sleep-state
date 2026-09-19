@@ -118,6 +118,8 @@ func TestBadCompressedRequestsNeverReachUpstream(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("invalid encoded request reached upstream") }))
+			e.config.RequestLimitMiB = 16
+			e.config.ZstdWindowMiB = 16
 			r := request(string(tt.body), "bad-encoding-token")
 			r.Header.Set("Content-Encoding", tt.encoding)
 			w := httptest.NewRecorder()

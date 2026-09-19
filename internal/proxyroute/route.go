@@ -153,9 +153,13 @@ func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 	seen := make(map[string]bool)
 	add := func(nodes []map[string]any) error {
 		for _, node := range nodes {
-			if len(routes) >= MaxNodes {
-				return errors.New("combined proxy pool exceeds 256 nodes")
+			if c.ExternalProxyOnly {
+				kind, _ := node["type"].(string)
+				if kind != "http" && kind != "socks5" {
+					return errors.New("当前是外部代理模式，只接受 HTTP/SOCKS5 端点；请在自己的代理客户端加载此订阅，再填写本地端口")
+				}
 			}
+
 			route, err := Build(node, len(routes))
 			if err != nil {
 				return fmt.Errorf("node %d: %w", len(routes)+1, err)
@@ -164,6 +168,10 @@ func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 			if seen[route.ID] {
 				route.Close()
 				continue
+			}
+			if len(routes) >= MaxNodes {
+				route.Close()
+				return errors.New("合并后的代理池超过 256 个不同节点，请减少订阅或设置筛选条件")
 			}
 			seen[route.ID] = true
 			routes = append(routes, route)
