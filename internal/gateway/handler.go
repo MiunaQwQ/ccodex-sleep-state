@@ -54,6 +54,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	outcome.Kind = endpointKind(r.URL.Path)
 	outcome.Result = "unverified"
 	model := e.settings().SelectedModel()
+	approvalReview := false
 	if generation || (r.Body != nil && r.Body != http.NoBody) {
 		slots := e.bodySlots
 		waiting := &e.bodyWaiting
@@ -102,7 +103,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, "invalid_json", "Expected a JSON request.")
 				return
 			}
-			if !settings.SupportedModel(input.Model) {
+			approvalReview = input.Model == approvalReviewModel
+			if !settings.SupportedModel(input.Model) && !approvalReview {
 				fail(w, 400, "unsupported_model", "支持 gpt-6-astra、gpt-5.6-sol 和 gpt-5.6-terra；请在 Codex 中选择受支持的模型。")
 				return
 			}
@@ -123,6 +125,9 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if compact {
 		outcome.Kind = "compact"
 	}
+	if approvalReview {
+		outcome.Kind = "approval_review"
+	}
 	outcome.Model = model
 	s, err := e.borrow(r.Header, model)
 	if err != nil {
@@ -142,12 +147,12 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 		}()
 	}
-	if rejectRequest(w, s) {
+	if !approvalReview && rejectRequest(w, s) {
 		return
 	}
 	// Compaction can reuse an existing ticket, but must never wait for a
 	// generation probe or apply response-state shape rules to its result.
-	inject := generation && !compact && !e.disabled.Load()
+	inject := generation && !compact && !approvalReview && !e.disabled.Load()
 	observeResponse := inject
 	epoch := e.injectionEpoch.Load()
 	if inject {
@@ -166,7 +171,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		snapshot, usable = s.state.Acquire(time.Now())
 		e.signal()
 	}
-	if rejectRequest(w, s) {
+	if !approvalReview && rejectRequest(w, s) {
 		return
 	}
 	if inject && !usable && e.settings().StateFallback == "passthrough" {
@@ -202,8 +207,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	compactTicket := compact && usable && !e.disabled.Load() && !e.settings().IsRelay()
-	compactBound := compactTicket || (compact && usable && e.pool.Get(e.routes[snapshot.Route].ID).State != "failed")
+	compactTicket := compact && usable && !approvalReview && !e.disabled.Load() && !e.settings().IsRelay()
+	compactBound := compactTicket || (compact && usable && !approvalReview && e.pool.Get(e.routes[snapshot.Route].ID).State != "failed")
 	if inject && usable || compactBound {
 		route = snapshot.Route
 	}
@@ -211,7 +216,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// egress preferences apply only when no state is being injected.
 	stateBound := inject && usable || compactTicket
 	if !stateBound && !compactBound && (e.settings().EgressMode == "random" || e.settings().EgressMode == "fixed") {
-		selected, err := e.selectEgress(snapshot.Route, false)
+		selected, err := e.selectEgressFor(snapshot.Route, false, approvalReview)
 		if err != nil {
 			fail(w, 503, "egress_unavailable", err.Error())
 			return
@@ -226,7 +231,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "pool_node_disabled", "所选出口已停用，请在代理池手动放回或选择其他出口")
 		return
 	}
-	if !stateBound && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {
+	if !stateBound && !approvalReview && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {
 		// Reserve before dispatch so concurrent requests cannot consume one random
 		// node twice. A fixed user exit is explicitly reusable.
 		allowUsed := e.settings().EgressMode != "random"
@@ -255,7 +260,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			pr.Out.URL.Path = strings.TrimRight(target.Path, "/") + strings.TrimPrefix(pr.In.URL.Path, "/backend-api/codex")
 			pr.Out.URL.RawPath = strings.TrimRight(target.EscapedPath(), "/") + strings.TrimPrefix(pr.In.URL.EscapedPath(), "/backend-api/codex")
 			pr.Out.Host = target.Host
-			if e.settings().IsRelay() {
+			if e.settings().IsRelay() || approvalReview {
 				pr.Out.Header.Del(turnstate.Header)
 			}
 			pr.Out.Header.Del("Cookie")
@@ -288,7 +293,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ModifyResponse: func(resp *http.Response) error {
 			responseReceived = true
 			resp.Header.Del("Set-Cookie")
-			if e.settings().IsRelay() {
+			if e.settings().IsRelay() || approvalReview {
 				resp.Header.Del(turnstate.Header)
 			}
 			if resp.StatusCode == 503 {
@@ -297,7 +302,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// A feature-specific permission/quota error (e.g. image generation)
 			// does not prove that chat credentials are rejected. Pass it through
 			// without poisoning the chat collector's account/state bookkeeping.
-			if generation {
+			if generation && !approvalReview {
 				e.reject(s, resp.StatusCode, retryDelay(resp.Header.Get("Retry-After")), route)
 			}
 			if generation && resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -369,7 +374,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			outcome.Result = responseStream.outcome()
 			if failure, ok := responseStream.failure.(*probeStreamError); ok {
 				outcome.ErrorCode = failure.kind
-				if failure.status == 401 || failure.status == 403 || failure.status == 429 {
+				if !approvalReview && (failure.status == 401 || failure.status == 403 || failure.status == 429) {
 					e.reject(s, failure.status, 0, route)
 				}
 			}
@@ -431,7 +436,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "response_model", outcome.ResponseModel, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_injected", outcome.StateInjected, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode)
 	}()
 	proxy.ServeHTTP(tracked, r)
-	if !stateBound && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {
+	if !stateBound && !approvalReview && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {
 		st, reason := "used", "request_dispatched"
 		if tracked.status >= 400 {
 			st, reason = "failed", "request_failed"

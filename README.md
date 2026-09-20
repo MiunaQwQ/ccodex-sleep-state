@@ -6,8 +6,9 @@
 
 [下载发布版](https://github.com/NanSsye/ccodex-sleep-state/releases) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NanSsye/ccodex-sleep-state/issues) · [上游项目](https://github.com/gylive/ccodex-sleep-state)
 
-## 当前版本：r18
+## 当前版本：r19
 
+- **自动审批兼容**：专用模型 `codex-auto-review` 按原模型和原请求转发，不注入聊天票、不打票、不更改审批内容或决定。最近请求会单独标记「自动审批」；聊天模型仍为 Astra、Sol、Terra。
 - **节点连接自动恢复**：同一代连接连续发生两次网络错误后，重建该节点的代理客户端和 HTTP 连接池。后续请求使用新连接，在途请求继续使用原连接直至结束；保留主票、备用票及来源节点，不自动重发生成请求。
 - **错误诊断更明确**：记录 DNS、TLS、超时、连接重置、连接拒绝、响应流中断等脱敏类别，以及错误阶段、连接代次和重建结果。「时间与诊断详情」显示最近连接错误及重建次数。
 - **版本化发布文件**：Mac、Windows、源码包和校验文件的文件名均带版本号，包内附 `VERSION`、`SOURCE_COMMIT` 和逐项更新说明。
@@ -34,12 +35,12 @@
 
 前提是 Codex 已完成自己的登录或 API 配置。下载 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 中与电脑匹配的文件，完整解压：
 
-| 电脑 | r18 文件 | 启动入口 |
+| 电脑 | r19 文件 | 启动入口 |
 | --- | --- | --- |
-| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r18-windows-amd64.zip` | `start.cmd` |
-| Windows ARM64 | `ccodex-sleep-state-r18-windows-arm64.zip` | `start.cmd` |
-| Mac Apple Silicon | `ccodex-sleep-state-r18-darwin-arm64.tar.gz` | `start.command` |
-| Mac Intel | `ccodex-sleep-state-r18-darwin-amd64.tar.gz` | `start.command` |
+| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r19-windows-amd64.zip` | `start.cmd` |
+| Windows ARM64 | `ccodex-sleep-state-r19-windows-arm64.zip` | `start.cmd` |
+| Mac Apple Silicon | `ccodex-sleep-state-r19-darwin-arm64.tar.gz` | `start.command` |
+| Mac Intel | `ccodex-sleep-state-r19-darwin-amd64.tar.gz` | `start.command` |
 
 1. 双击对应启动脚本，保持终端窗口运行。
 2. 浏览器打开本地面板；没有配置过节点时，在「订阅与代理」添加自己的来源。
@@ -61,7 +62,7 @@
 
 Windows CMD 对应 `ccodex-sleep-state.exe setup`。退出用 `Ctrl+C`，等待配置恢复完成。升级前停止旧程序，替换程序和文档，保留自己的配置与数据目录。
 
-所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r18-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
+所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r19-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
 
 [Windows 教程](docs/windows.md) · [macOS 教程](docs/macos.md) · [面板教程](docs/web-panel.md) · [代理与订阅](docs/proxies.md)
 

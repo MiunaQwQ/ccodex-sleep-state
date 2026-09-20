@@ -233,6 +233,9 @@ func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if outcome.Kind == "compact" {
 			kind = "远程压缩"
 		}
+		if outcome.Kind == "approval_review" {
+			kind = "自动审批"
+		}
 		c.history.record(requestEvent{Kind: kind, Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC(), RequestOutcome: *outcome})
 	}()
 	w = observed

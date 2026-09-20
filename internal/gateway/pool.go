@@ -24,6 +24,10 @@ func (e *Engine) PoolStatus() []PoolRow {
 	return rows
 }
 func (e *Engine) selectEgress(harvest int, hasState bool) (int, error) {
+	return e.selectEgressFor(harvest, hasState, false)
+}
+
+func (e *Engine) selectEgressFor(harvest int, hasState, allowUsed bool) (int, error) {
 	if e.settings().EgressMode == "fixed" {
 		for i, r := range e.routes {
 			if r.ID == e.settings().EgressRoute {
@@ -59,7 +63,7 @@ func (e *Engine) selectEgress(harvest int, hasState bool) (int, error) {
 			continue
 		}
 
-		if st == "disabled" || st == "failed" || (e.settings().PoolEnabled && st == "used") {
+		if st == "disabled" || st == "failed" || (e.settings().PoolEnabled && st == "used" && !allowUsed) {
 			continue
 		}
 		candidates = append(candidates, i)

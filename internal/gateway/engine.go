@@ -117,7 +117,7 @@ func (e *Engine) borrow(h http.Header, models ...string) (*session, error) {
 	if len(models) > 0 {
 		model = models[0]
 	}
-	if !settings.SupportedModel(model) {
+	if !settings.SupportedModel(model) && model != approvalReviewModel {
 		return nil, errors.New("unsupported model")
 	}
 	auth := h.Get("Authorization")
@@ -843,6 +843,9 @@ func (e *Engine) Status() map[string]any {
 	}
 	states := make([]sessionStatus, 0, len(e.sessions))
 	for _, s := range e.sessions {
+		if s.model == approvalReviewModel {
+			continue // Reviewer traffic has no ticket session in the panel.
+		}
 		e.syncRoutes(s, time.Now())
 		state := s.state.Status(time.Now())
 		active, activeOK := s.state.Acquire(time.Now())
