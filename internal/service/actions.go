@@ -216,6 +216,12 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		c.nodeTestAction(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/state/discard" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		c.discardStateAction(w, r)
+		return
+	}
 	// One management operation at a time. Never queue a chain of test requests.
 	if !c.action.TryLock() {
 		reply(w, 409, map[string]string{"error": "另一个管理操作还没完成，请稍后再试"})
@@ -685,6 +691,39 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(w, 404, map[string]string{"error": "没有这个管理接口"})
 	}
+}
+
+func (c *control) discardStateAction(w http.ResponseWriter, r *http.Request) {
+	var v struct {
+		SessionID string `json:"session_id"`
+		StateID   string `json:"state_id"`
+	}
+	if err := decode(w, r, &v); err != nil {
+		reply(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if v.SessionID == "" || len(v.StateID) != 16 {
+		reply(w, 400, map[string]string{"error": "请选择要丢弃的会话和具体票"})
+		return
+	}
+	if c.engine == nil {
+		reply(w, 409, map[string]string{"error": "服务尚未准备好"})
+		return
+	}
+	result, err := c.engine.DiscardState(v.SessionID, v.StateID)
+	if err != nil {
+		reply(w, 409, map[string]string{"error": err.Error()})
+		return
+	}
+	message := "已丢弃指定票，其他票保留；空位按原有节奏补采，也可手动打票。"
+	if result.Role == "active" {
+		if result.ActiveID != "" {
+			message = "已丢弃主票，最早取得的可用备用票已接替；空位按原有节奏补采。"
+		} else {
+			message = "已丢弃主票，当前没有可用备用票；将按原有规则补采，也可立即手动打票。"
+		}
+	}
+	reply(w, 200, map[string]any{"message": message, "discarded": result})
 }
 
 // Manual collection may wait on the network, but does not replace the engine.

@@ -5,6 +5,7 @@ if (location.hash) history.replaceState(null, "", location.pathname);
 let token = sessionStorage.getItem("sleep-state-control") || "";
 let state = null;
 const pendingButtons = new Set();
+const discardConfirmations = new Set();
 let refreshing = null;
 let noticeTimer;
 let recovery = null;
@@ -219,6 +220,8 @@ async function refreshStatus() {
         "hint",
       ),
     );
+  const liveDiscardKeys = new Set((state.sessions || []).flatMap(s => (s.states || []).map(c => `${s.id}:${c.id}`)));
+  for (const key of discardConfirmations) if (!liveDiscardKeys.has(key)) discardConfirmations.delete(key);
   const sessionRows = (state.supported_models || []).flatMap((model, modelIndex) => {
     const matches = (state.sessions || []).filter(session => session.model === model).sort((a, b) => a.id.localeCompare(b.id));
     return matches.length ? matches.map((session, index) => ({session, number:matches.length === 1 ? String(modelIndex + 1) : `${modelIndex + 1}.${index + 1}`})) : [{session:{model}, number:String(modelIndex + 1)}];
@@ -292,6 +295,35 @@ async function refreshStatus() {
         const evidence = sameCard && checked.result === "header_missing" ? "最近回复未带 state · 无法核验" : sameCard && checked.result === "header_accepted" ? "最近回复符合本地规则" : "符合本地规则 · 尚无当前牌的核验记录";
         item.append(textNode("p", evidence, "state-evidence"));
       }
+      const discardLabel = card.role === "active" ? "丢弃主票" : card.role === "standby" ? "丢弃备用票" : "丢弃此票";
+      const discardKey = `${session.id}:${card.id}`;
+      const cardActions = textNode("div", "", "state-card-actions");
+      const renderDiscardActions = () => {
+        cardActions.replaceChildren();
+        if (!discardConfirmations.has(discardKey)) {
+          const discard = textNode("button", discardLabel, "state-discard");
+          discard.setAttribute("aria-label", `${discardLabel} ${card.id.slice(0, 8)}`);
+          discard.title = "只丢弃这张票，保留来源节点和其他票；已经发出的请求继续完成。";
+          discard.addEventListener("click", () => { discardConfirmations.add(discardKey); renderDiscardActions(); });
+          cardActions.append(discard);
+          return;
+        }
+        const effect = card.role === "active" ? "有备用按顺序接替，无备用按原规则补采。" : "主票和其他备用票保持不变。";
+        const explanation = textNode("p", `丢弃 ${card.id.slice(0, 8)}？${effect}当前请求继续完成。`, "discard-explanation");
+        const cancel = textNode("button", "取消", "quiet");
+        cancel.addEventListener("click", () => { discardConfirmations.delete(discardKey); renderDiscardActions(); });
+        const confirmDiscard = textNode("button", "确认丢弃", "state-discard");
+        confirmDiscard.setAttribute("aria-label", `确认丢弃 ${card.id.slice(0, 8)}`);
+        confirmDiscard.addEventListener("click", () => action(async () => {
+          try { notice((await api("state/discard", {session_id:session.id, state_id:card.id})).message); }
+          catch (error) { notice(error.message); }
+          discardConfirmations.delete(discardKey);
+          await refreshStatus();
+        }));
+        cardActions.append(explanation, cancel, confirmDiscard);
+      };
+      renderDiscardActions();
+      item.append(cardActions);
       if(card.role==="parked") detail.append(item);else cards.append(item);
       const full = textNode("div", "", "state-full-detail");
       full.append(textNode("strong", `${role} · ${card.id.slice(0, 8)} · ${card.route_label || card.route_id}`));
@@ -350,7 +382,7 @@ async function refreshStatus() {
       detail.append(textNode("p", `全程序最近一小时自动采集 ${c.hourly_used}/${c.hourly_budget} 次（不含手动打票）；本会话连续失败 ${failures}。${reasons[c.reason] || c.reason}${!c.idle && c.wait_seconds > 0 ? `，约 ${duration(c.wait_seconds)} 后可采集（${stateTime(c.next_at)}）` : ""}。`, "hint"));
     }
     if(session.state_events?.length) {
-      const names={acquired_main:"取得主用",acquired_standby:"取得备用",promoted:"接替为主用",expired:"已到期",invalidated:"收到明确不合格结果，已撤下",source_suspended:"来源停用，暂停使用",source_resumed:"来源恢复，重新入队"};
+      const names={acquired_main:"取得主用",acquired_standby:"取得备用",promoted:"接替为主用",expired:"已到期",invalidated:"收到明确不合格结果，已撤下",discarded:"手动丢弃",source_suspended:"来源停用，暂停使用",source_resumed:"来源恢复，重新入队"};
       const history=textNode("details","","state-history");history.append(textNode("summary","卡片变更记录"));
       for(const event of session.state_events.slice(-12).reverse())history.append(textNode("p",`${stateClock(event.at)} · ${event.state_id.slice(0,8)} · ${names[event.kind]||event.kind}`,"hint"));
       detail.append(history);

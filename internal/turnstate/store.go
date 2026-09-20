@@ -25,10 +25,11 @@ type PersistedSnapshot struct {
 // Persisted is intentionally limited to state candidates. Credentials and
 // request bodies never enter the backup file.
 type Persisted struct {
-	Active  *PersistedSnapshot  `json:"active,omitempty"`
-	Standby []PersistedSnapshot `json:"standby,omitempty"`
-	Parked  []PersistedSnapshot `json:"parked,omitempty"`
-	SavedAt time.Time           `json:"saved_at"`
+	Active    *PersistedSnapshot  `json:"active,omitempty"`
+	Standby   []PersistedSnapshot `json:"standby,omitempty"`
+	Parked    []PersistedSnapshot `json:"parked,omitempty"`
+	SavedAt   time.Time           `json:"saved_at"`
+	Discarded []DiscardedState    `json:"discarded,omitempty"`
 }
 
 // Store publishes one active state and keeps a bounded set of standby states.
@@ -42,6 +43,7 @@ type Store struct {
 	active, ready Snapshot
 	standby       []Snapshot
 	parked        []Snapshot
+	discarded     []DiscardedState
 	suspended     map[int]bool
 	events        []Event
 	version       uint64
@@ -98,6 +100,13 @@ func (s *Store) promote(now time.Time) {
 }
 
 func (s *Store) prune(now time.Time) {
+	keptDiscards := s.discarded[:0]
+	for _, v := range s.discarded {
+		if now.Before(v.ExpiresAt) {
+			keptDiscards = append(keptDiscards, v)
+		}
+	}
+	s.discarded = keptDiscards
 	if s.active.Token.Value != "" && !s.policy.Accept(s.active.Token, now) {
 		s.record("expired", s.active, now)
 		s.active = Snapshot{}
@@ -123,7 +132,7 @@ func (s *Store) Offer(t Token, route int, now time.Time) bool {
 	defer s.mu.Unlock()
 	s.candidates++
 	s.promote(now)
-	if !s.policy.Accept(t, now) || s.suspended[route] {
+	if !s.policy.Accept(t, now) || s.suspended[route] || s.isDiscarded(t.Fingerprint, now) {
 		return false
 	}
 	if t.Fingerprint == s.active.Token.Fingerprint {
@@ -160,7 +169,7 @@ func (s *Store) Bootstrap(t Token, route int, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.promote(now)
-	if s.policy.Accept(s.active.Token, now) || !s.policy.Accept(t, now) || s.suspended[route] {
+	if s.policy.Accept(s.active.Token, now) || !s.policy.Accept(t, now) || s.suspended[route] || s.isDiscarded(t.Fingerprint, now) {
 		return false
 	}
 	s.candidates++
@@ -234,8 +243,12 @@ func (s *Store) Status(now time.Time) Status {
 func (s *Store) Export(now time.Time, routeID func(int) string) Persisted {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.exportLocked(now, routeID)
+}
+
+func (s *Store) exportLocked(now time.Time, routeID func(int) string) Persisted {
 	s.promote(now)
-	result := Persisted{SavedAt: now.UTC()}
+	result := Persisted{SavedAt: now.UTC(), Discarded: append([]DiscardedState(nil), s.discarded...)}
 	if s.policy.Accept(s.active.Token, now) {
 		result.Active = &PersistedSnapshot{Token: s.active.Token.Value, RouteID: routeID(s.active.Route), Issued: s.active.Token.Issued, AcquiredAt: s.active.AcquiredAt}
 	}
@@ -258,13 +271,14 @@ func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.active, s.ready, s.standby, s.parked = Snapshot{}, Snapshot{}, nil, nil
+	s.discarded = append([]DiscardedState(nil), p.Discarded...)
 	add := func(raw PersistedSnapshot) (Snapshot, bool) {
 		route, ok := routeIndex(raw.RouteID)
 		if !ok {
 			return Snapshot{}, false
 		}
 		t, err := Parse(raw.Token)
-		if err != nil || !s.policy.Accept(t, now) {
+		if err != nil || !s.policy.Accept(t, now) || s.isDiscarded(t.Fingerprint, now) {
 			return Snapshot{}, false
 		}
 		return Snapshot{Token: t, Route: route, AcquiredAt: raw.AcquiredAt}, true
