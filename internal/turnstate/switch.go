@@ -8,7 +8,10 @@ import (
 func persistedSnapshot(v Snapshot, routeID func(int) string) PersistedSnapshot {
 	p := PersistedSnapshot{Token: v.Token.Value, RouteID: routeID(v.Route), Issued: v.Token.Issued, AcquiredAt: v.AcquiredAt}
 	if v.ManualRoute {
-		p.SourceRouteID = routeID(v.SourceRoute)
+		p.SourceRouteID = v.SourceRouteID
+		if p.SourceRouteID == "" {
+			p.SourceRouteID = routeID(v.SourceRoute)
+		}
 	}
 	return p
 }
@@ -28,6 +31,7 @@ func (s *Store) SwitchRoute(id string, version uint64, route int, now time.Time,
 	candidate := s.active
 	if !candidate.ManualRoute {
 		candidate.SourceRoute = candidate.Route
+		candidate.SourceRouteID = routeID(candidate.Route)
 	}
 	candidate.Route, candidate.ManualRoute, candidate.Version = route, true, s.version+1
 	// Construct an independent export so even expiry/pruning stays private until

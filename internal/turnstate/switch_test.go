@@ -48,6 +48,15 @@ func TestSwitchRetainsTicketRejectsStaleResponseAndPersists(t *testing.T) {
 	if got.Route != 0 || got.SourceRoute != 2 || !got.ManualRoute || got.Token != a || restored.Status(now).Standby != 1 {
 		t.Fatal("restore lost route, source or standby")
 	}
+	delete(reordered, "source")
+	restored.Restore(saved, now, func(id string) (int, bool) { i, ok := reordered[id]; return i, ok })
+	got, ok := restored.Acquire(now)
+	if !ok || got.Token != a || got.Route != 0 || got.SourceRouteID != "source" || got.SourceRoute != -1 {
+		t.Fatal("removing old source discarded switched main")
+	}
+	if restored.Export(now, func(i int) string { return []string{"chosen", "backup"}[i] }).Active.SourceRouteID != "source" {
+		t.Fatal("missing source metadata was lost on save")
+	}
 	// Disabling the old source must not disable the user's explicit new egress.
 	s.SuspendRoutes(map[int]bool{0: true}, now)
 	if got, ok := s.Acquire(now); !ok || got.Token != a || got.Route != 1 {

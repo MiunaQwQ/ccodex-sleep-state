@@ -64,7 +64,7 @@ let switchTarget = null;
 function openRouteSwitch(session,card) {
   switchTarget = {session_id:session.id,state_id:card.id,version:card.version};
   $("switch-ticket-label").textContent = `${session.model} · 主票 ${card.id.slice(0,8)}`;
-  $("switch-current-route").textContent = `当前节点：${card.route_label || card.route_id}；采集来源：${card.source_route_label || card.route_label || card.route_id}`;
+  $("switch-current-route").textContent = `当前节点：${card.route_label || card.route_id}；采集来源：${card.source_route_label || card.source_route_id || card.route_label || card.route_id}`;
   const select = $("switch-route-select");
   select.replaceChildren();
   for (const node of state.pool_nodes || []) {

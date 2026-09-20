@@ -167,7 +167,7 @@ async function refreshStatus() {
   $("injection-help").textContent =
     state.injection_reason ||
     (state.injection_enabled
-      ? "注入已开启，是否已有可用 state 请看会话状态。"
+      ? "注入已开启，是否已有可用 state 请看模型票池状态。"
       : "注入已关闭，不采集或替换 state。");
   for (const id of ["recover", "inspect-recovery"])
     $(id).disabled = !state.configuration_writable;
@@ -214,7 +214,7 @@ async function refreshStatus() {
       textNode(
         "p",
         traffic.total
-          ? "已经有请求到达，但还没有保留中的模型会话。请看上面的状态码；模型列表请求、被拦截请求或过期会话不代表已成功生成。"
+          ? "已经有请求到达，但还没有保留中的模型票池。请看上面的状态码；模型列表请求、被拦截请求或过期会话不代表已成功生成。"
           : state.configured_codex
             ? "还没收到请求。请重启 Codex，并新建会话发一条短消息；若仍为空，检查是否启动了另一份 Codex 配置。"
             : "还没有请求到达本服务。先到「连接设置」完成配置接管，再重启 Codex。仅能打开面板不代表接入完成。",
@@ -241,7 +241,7 @@ async function refreshStatus() {
       continue;
     }
     let description =
-      "会话 " + number + " · " + (phases[session.phase] || session.phase);
+      "票池 " + number + " · " + (phases[session.phase] || session.phase);
     if (session.upstream_pause_seconds) description += ` · 上游暂停 ${session.upstream_pause_seconds} 秒`;
     if (session.retry_after_seconds)
       description += " · 还需等待约 " + session.retry_after_seconds + " 秒";
@@ -293,8 +293,8 @@ async function refreshStatus() {
       if (card.manual_route) item.append(textNode("p", `已手动切换 · 采集来源：${card.source_route_label || card.source_route_id}`, "state-evidence"));
       if (card.role === "active") {
         const checked = session.last_state_check;
-        const sameCard = checked?.state_id === card.id;
-        const evidence = sameCard && checked.result === "header_missing" ? "最近回复未带 state · 无法核验" : sameCard && checked.result === "header_accepted" ? "最近回复符合本地规则" : "符合本地规则 · 尚无当前牌的核验记录";
+        const sameCard = checked?.state_id === card.id && checked?.route_id === card.route_id;
+        const evidence = sameCard && checked.result === "header_missing" ? "最近回复未带 state · 无法核验" : sameCard && checked.result === "header_accepted" ? "最近回复符合本地规则" : "符合本地规则 · 尚无当前节点的核验记录";
         item.append(textNode("p", evidence, "state-evidence"));
       }
       const discardLabel = card.role === "active" ? "丢弃主票" : card.role === "standby" ? "丢弃备用票" : "丢弃此票";
@@ -392,7 +392,7 @@ async function refreshStatus() {
       }
       reasons.collecting = "正在补采；聊天回复与采集独立进行";
       const failures = c.cadence === "round" ? `${c.failures} 次（默认轮次）` : `${c.failures}/${c.search_budget} 次`;
-      detail.append(textNode("p", `全程序最近一小时自动采集 ${c.hourly_used}/${c.hourly_budget} 次（不含手动打票）；本会话连续失败 ${failures}。${reasons[c.reason] || c.reason}${!c.idle && c.wait_seconds > 0 ? `，约 ${duration(c.wait_seconds)} 后可采集（${stateTime(c.next_at)}）` : ""}。`, "hint"));
+      detail.append(textNode("p", `全程序最近一小时自动采集 ${c.hourly_used}/${c.hourly_budget} 次（不含手动打票）；此票池连续失败 ${failures}。${reasons[c.reason] || c.reason}${!c.idle && c.wait_seconds > 0 ? `，约 ${duration(c.wait_seconds)} 后可采集（${stateTime(c.next_at)}）` : ""}。`, "hint"));
     }
     if(session.state_events?.length) {
       const names={acquired_main:"取得主用",acquired_standby:"取得备用",promoted:"接替为主用",expired:"已到期",invalidated:"收到明确不合格结果，已撤下",discarded:"手动丢弃",source_suspended:"来源停用，暂停使用",source_resumed:"来源恢复，重新入队"};
@@ -432,7 +432,7 @@ async function refreshStatus() {
         action(async () => {
           if (
             !confirm(
-              `重新采集会使用这个会话的账号和模型，失败会按间隔和预算自动补采，会消耗额度；登录失效或上游限流时暂停。继续？`,
+              `重新采集会使用此票池的账号和模型，失败会按间隔和预算自动补采，会消耗额度；登录失效或上游限流时暂停。继续？`,
             )
           )
             return;

@@ -37,7 +37,10 @@ func (s *Store) Cards(now time.Time, route func(int) (string, string)) []Card {
 		}
 		sourceID, sourceLabel := id, label
 		if v.ManualRoute {
-			sourceID, sourceLabel = route(v.SourceRoute)
+			sourceID, sourceLabel = v.SourceRouteID, ""
+			if v.SourceRoute >= 0 {
+				sourceID, sourceLabel = route(v.SourceRoute)
+			}
 		}
 		result = append(result, Card{ID: v.Token.Fingerprint, Role: role, RouteID: id, RouteLabel: label, AcquiredAt: v.AcquiredAt, IssuedAt: v.Token.Issued, ExpiresAt: expires, UsableUntil: expires.Add(-30 * time.Second), RemainingSeconds: max(0, int(expires.Sub(now).Seconds())), AgeSeconds: age, Version: v.Version, SourceRouteID: sourceID, SourceRouteLabel: sourceLabel, ManualRoute: v.ManualRoute})
 	}

@@ -13,8 +13,9 @@ type Snapshot struct {
 	Version    uint64
 	// Route is the current egress. SourceRoute preserves the acquisition node
 	// after an explicit manual switch; old snapshots remain immutable.
-	SourceRoute int
-	ManualRoute bool
+	SourceRoute   int
+	ManualRoute   bool
+	SourceRouteID string
 }
 
 // PersistedSnapshot is the private, opaque form used by the local backup.
@@ -291,9 +292,10 @@ func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int
 		if raw.SourceRouteID != "" {
 			source, exists := routeIndex(raw.SourceRouteID)
 			if !exists {
-				return Snapshot{}, false
+				source = -1
 			}
 			v.SourceRoute, v.ManualRoute = source, true
+			v.SourceRouteID = raw.SourceRouteID
 		}
 		return v, true
 	}
