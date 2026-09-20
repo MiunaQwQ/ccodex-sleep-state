@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// RetryRandomState is an explicit one-shot exception to local pacing only.
-// It does not change the configured pin, current state, or automatic deck.
+// RetryRandomState is one explicit manual ticket attempt, independent of all
+// timed collection gates. It never clears the automatic collector's limits.
 func (e *Engine) RetryRandomState(ctx context.Context, sessionID string) error {
 	if e.disabled.Load() {
 		return errors.New("请先开启注入")
@@ -36,26 +36,28 @@ func (e *Engine) RetryRandomState(ctx context.Context, sessionID string) error {
 		s.mu.Unlock()
 		return errors.New("会话尚未启用或正在采集，请等待当前采集结束")
 	}
-	if status, _ := s.rejection(); status != 0 {
+	if status, _ := s.rejection(); status == 401 || status == 403 {
 		s.mu.Unlock()
-		return fmt.Errorf("上游返回 %d，不能通过随机切换绕过登录或限流暂停", status)
-	}
-	if schedule := e.probeSchedule(s, time.Now(), true); schedule.WaitSeconds > 0 {
-		s.mu.Unlock()
-		return fmt.Errorf("%s，仍需等待 %d 秒", schedule.Reason, schedule.WaitSeconds)
+		return fmt.Errorf("上游返回 %d，请先处理登录或访问权限", status)
 	}
 	active, usable := s.state.Acquire(time.Now())
-	var candidates []int
+	var candidates, alternatives []int
 	for i, route := range e.routes {
 		entry := e.pool.Get(route.ID)
-		if entry.State != "available" || time.Now().Before(s.nodePauses[i]) || (usable && active.Route == i) || (s.lastProbeResult != nil && s.lastProbeResult.Route == route.ID) {
+		if entry.State != "available" || (usable && active.Route == i) {
 			continue
 		}
 		candidates = append(candidates, i)
+		if s.lastProbeResult == nil || s.lastProbeResult.Route != route.ID {
+			alternatives = append(alternatives, i)
+		}
+	}
+	if len(alternatives) > 0 {
+		candidates = alternatives
 	}
 	if len(candidates) == 0 {
 		s.mu.Unlock()
-		return errors.New("没有另一个可用采集节点；已跳过当前主卡节点、上次采集节点和暂停/失败节点")
+		return errors.New("没有可用的其他采集节点；已跳过当前主卡节点和停用/失败节点")
 	}
 	index := candidates[rand.IntN(len(candidates))]
 	s.busy++

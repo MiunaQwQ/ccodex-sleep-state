@@ -14,6 +14,7 @@ type RequestOutcome struct {
 	RouteLabel    string `json:"route_label,omitempty"`
 	Model         string `json:"model,omitempty"`
 	ResponseModel string `json:"response_model,omitempty"`
+	StateInjected bool   `json:"state_injected"`
 }
 type outcomeKey struct{}
 

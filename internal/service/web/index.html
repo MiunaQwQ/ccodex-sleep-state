@@ -14,7 +14,7 @@
       <div class="brand">
         <span class="mark" aria-hidden="true">S</span>
         <div>
-          <strong>Sleep State</strong><small>本地连接管理 · r15</small>
+          <strong>Sleep State</strong><small>本地连接管理 · r16</small>
         </div>
       </div>
       <span class="local"><i></i> 本机私有</span
@@ -141,7 +141,7 @@
                 <div><label for="failure-max-interval">失败后最大间隔（秒）</label><input id="failure-max-interval" type="number" min="1" max="3600" step="1" required /><small>连续失败时翻倍等待，达到此值后不再增加。</small></div>
                 <div><label for="search-budget">连续失败预算（次）</label><input id="search-budget" type="number" min="1" max="1000" step="1" required /><small>本会话成功后归零；失败达到预算后暂停。</small></div>
                 <div><label for="search-pause">连续失败预算耗尽后暂停（秒）</label><input id="search-pause" type="number" min="30" max="86400" step="1" required /><small>暂停结束可自动继续，仍受每小时总预算约束。</small></div>
-                <div><label for="hourly-budget">全程序滚动一小时采集预算（次）</label><input id="hourly-budget" type="number" min="1" max="1000" step="1" required /><small>所有会话和手动采集合计；不计普通 AI 请求。重启及保存设置不重置。</small></div>
+                <div><label for="hourly-budget">全程序滚动一小时采集预算（次）</label><input id="hourly-budget" type="number" min="1" max="1000" step="1" required /><small>适用于自动采集和普通重采；手动打票不受限制、不占用此预算。重启及保存设置不重置。</small></div>
                 <div><label for="collection-idle">AI 空闲多久暂停采集（秒）</label><input id="collection-idle" type="number" min="30" max="1800" step="1" required /><small>默认 300 秒。AI 请求结束后开始计时；面板刷新、模型列表和补采本身不延长时间。</small></div>
               </div>
               <p id="timing-summary" class="hint" aria-live="polite"></p>
@@ -408,7 +408,7 @@
     </div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <footer>
-      Sleep State · 本地管理 · r15
+      Sleep State · 本地管理 · r16
     </footer>
   </body>
 </html>

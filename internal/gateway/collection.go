@@ -64,17 +64,11 @@ func (e *Engine) seekingActive(s *session, now time.Time) bool {
 	return e.settings().Collection.Cadence == "round" && !s.state.Status(now).Usable
 }
 
-// Caller holds s.mu. Compute one effective gate for scheduling, manual retry,
-// HTTP Retry-After and the panel. An explicit manual random attempt may skip
-// local pacing without resetting persisted history or upstream restrictions.
-func (e *Engine) probeSchedule(s *session, now time.Time, manualRandom ...bool) CollectionStatus {
-	urgent := len(manualRandom) > 0 && manualRandom[0]
-	policy := e.settings().Collection
-	if urgent {
-		policy.Cadence = "round"
-	}
-	status := e.collection.Status(s.backupKey, now, policy, urgent)
-	if !urgent && s.nextProbe.After(now) && s.nextProbe.After(status.NextAt) {
+// Caller holds s.mu. Shared schedule for automatic collection, normal retry,
+// HTTP Retry-After and the panel. Manual tickets do not use this schedule.
+func (e *Engine) probeSchedule(s *session, now time.Time) CollectionStatus {
+	status := e.collection.Status(s.backupKey, now, e.settings().Collection)
+	if s.nextProbe.After(now) && s.nextProbe.After(status.NextAt) {
 		status.NextAt, status.Reason = s.nextProbe, "success_cooldown"
 	}
 	if s.upstreamPause.After(now) && s.upstreamPause.After(status.NextAt) {

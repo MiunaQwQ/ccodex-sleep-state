@@ -381,7 +381,8 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		}
 		return
 	}
-	if status, _ := s.rejection(); status != 0 || e.probeSchedule(s, time.Now(), manualRandom).WaitSeconds > 0 {
+	status, _ := s.rejection()
+	if status == 401 || status == 403 || (!manualRandom && (status != 0 || e.probeSchedule(s, time.Now()).WaitSeconds > 0)) {
 		s.mu.Unlock()
 		return
 	}
@@ -393,11 +394,11 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 	roundCadence := e.settings().Collection.Cadence == "round"
 	roundCooldown := time.Duration(e.settings().CooldownSeconds) * time.Second
 	defer func() {
-		if roundCadence && attempts > 0 {
+		if !manualRandom && roundCadence && attempts > 0 {
 			e.collection.EndRound(s.backupKey, time.Now(), roundCooldown)
 		}
 		s.mu.Lock()
-		if roundCadence && attempts > 0 {
+		if !manualRandom && roundCadence && attempts > 0 {
 			s.nextProbe = e.collection.Status(s.backupKey, time.Now(), e.settings().Collection).NextAt
 		}
 		s.probing = nil
@@ -446,7 +447,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 			s.mu.Unlock()
 			return
 		}
-		if status, _ := s.rejection(); status != 0 {
+		if status, _ := s.rejection(); status == 401 || status == 403 || (!manualRandom && status != 0) {
 			s.mu.Unlock()
 			return
 		}
@@ -464,7 +465,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		s.mu.Lock()
 		paused := time.Now().Before(s.nodePauses[route])
 		s.mu.Unlock()
-		if paused {
+		if paused && !manualRandom {
 			continue
 		}
 		if tried[route] {
@@ -478,15 +479,13 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 			continue
 		}
 		seekingActive = seekingActive || e.seekingActive(s, time.Now())
-		policy := e.settings().Collection
-		if manualRandom {
-			policy.Cadence = "round" // Skip local pacing only, never hourly/storage gates.
-		}
-		if until, reason := e.collection.ReserveRound(s.backupKey, time.Now(), policy, manualRandom || (roundCadence && attempts > 0), roundCooldown); !until.IsZero() {
-			s.mu.Lock()
-			s.nextProbe, s.diagnostic = until, reason
-			s.mu.Unlock()
-			return
+		if !manualRandom {
+			if until, reason := e.collection.ReserveRound(s.backupKey, time.Now(), e.settings().Collection, roundCadence && attempts > 0, roundCooldown); !until.IsZero() {
+				s.mu.Lock()
+				s.nextProbe, s.diagnostic = until, reason
+				s.mu.Unlock()
+				return
+			}
 		}
 		if e.settings().PoolEnabled && len(only) == 0 && pinned < 0 {
 			if err := e.pool.ClaimProbe(e.routes[route].ID, len(only) > 0); err != nil {
@@ -508,7 +507,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		tried[route] = true
 		started := time.Now()
 		e.log.Info("probe_started", "route", e.routes[route].ID, "model", s.model,
-			"round_attempt", attempts, "foreground_requests", e.foreground.Load())
+			"round_attempt", attempts, "manual_ticket", manualRandom, "foreground_requests", e.foreground.Load())
 		token, status, retryAfter, err := e.probe(ctx, s.headers, e.routes[route], s.model)
 		if ctx.Err() != nil {
 			_ = e.pool.FinishProbe(e.routes[route].ID, "available", "probe_cancelled")
@@ -568,7 +567,9 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		}
 		// Probe failures belong to this model session only. A model that cannot
 		// produce a state must never poison another model's usable state pool.
-		e.collection.Complete(s.backupKey, time.Now(), accepted, e.settings().Collection, result, e.routes[route].ID)
+		if !manualRandom {
+			e.collection.Complete(s.backupKey, time.Now(), accepted, e.settings().Collection, result, e.routes[route].ID)
+		}
 		if e.settings().PoolEnabled {
 			// A probe result is a health observation, not a permanent lease. Keep
 			// successful and shape results eligible. A transport timeout is a
@@ -586,7 +587,9 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		s.diagnostic, s.observedBlocks, s.lastProbe = result, token.Blocks, time.Now()
 		// Only a still-usable successful state earns a cooldown. A concurrent 312
 		// may have invalidated it already and must not be overwritten by this defer.
-		if accepted && e.statePoolReady(s, time.Now()) {
+		if manualRandom {
+			// A manual ticket cannot reset or extend the automatic schedule.
+		} else if accepted && e.statePoolReady(s, time.Now()) {
 			s.nextProbe = time.Now().Add(time.Duration(e.settings().CooldownSeconds) * time.Second)
 		} else if accepted {
 			s.nextProbe = time.Time{}
@@ -602,7 +605,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		}
 		// Shape metadata explains a rejected probe without exposing its token.
 		e.log.Info("probe_finished", "route", e.routes[route].ID, "status", status,
-			"accepted", accepted, "result", result, "state_blocks", token.Blocks,
+			"accepted", accepted, "result", result, "manual_ticket", manualRandom, "state_blocks", token.Blocks,
 			"expected_blocks", s.policy.Blocks, "model", s.model,
 			"duration_ms", time.Since(started).Milliseconds(), "foreground_requests", e.foreground.Load())
 		// Preserve upstream account limits rather than converting them to a

@@ -102,8 +102,8 @@ func TestR14RandomModeCompactAllowsOnlyHealthySource(t *testing.T) {
 	calls := 0
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if r.Header.Get(turnstate.Header) != "" {
-			t.Error("compact injected card")
+		if r.Header.Get(turnstate.Header) != fakeToken(10, 221) {
+			t.Error("compact did not inject active card")
 		}
 		complete(w, "")
 	}))

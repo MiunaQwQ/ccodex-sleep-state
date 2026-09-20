@@ -722,5 +722,9 @@ func (c *control) retryStateAction(w http.ResponseWriter, r *http.Request) {
 		fail(err)
 		return
 	}
+	if v.RandomOnce {
+		reply(w, 200, map[string]string{"message": "本次手动打票完成，只尝试了一个随机节点；没有冷却时间，也未占用自动采集预算。"})
+		return
+	}
 	reply(w, 200, map[string]string{"message": "本轮采集已完成。请查看会话里的实际长度和结果；采不到时不会自动重复消耗额度。"})
 }

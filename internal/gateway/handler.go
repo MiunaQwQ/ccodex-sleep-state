@@ -144,7 +144,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if rejectRequest(w, s) {
 		return
 	}
-	// Compaction has its own upstream protocol. Do not require a synthetic
+	// Compaction can reuse an existing ticket, but must never wait for a
 	// generation probe or apply response-state shape rules to its result.
 	inject := generation && !compact && !e.disabled.Load()
 	observeResponse := inject
@@ -201,13 +201,14 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	compactBound := compact && usable && e.pool.Get(e.routes[snapshot.Route].ID).State != "failed"
+	compactTicket := compact && usable && !e.disabled.Load() && !e.settings().IsRelay()
+	compactBound := compactTicket || (compact && usable && e.pool.Get(e.routes[snapshot.Route].ID).State != "failed")
 	if inject && usable || compactBound {
 		route = snapshot.Route
 	}
 	// A state and its source route form one immutable request snapshot. User
 	// egress preferences apply only when no state is being injected.
-	stateBound := inject && usable
+	stateBound := inject && usable || compactTicket
 	if !stateBound && !compactBound && (e.settings().EgressMode == "random" || e.settings().EgressMode == "fixed") {
 		selected, err := e.selectEgress(snapshot.Route, false)
 		if err != nil {
@@ -238,6 +239,9 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	outcome.RouteLabel = e.routes[route].DisplayName
 	started := time.Now()
 	stateCheck := "not_injected"
+	if compactTicket {
+		stateCheck = "compact_ticket_unchecked"
+	}
 	transport := e.routes[route].Transport
 	if kind := endpointKind(r.URL.Path); kind == "image_generation" || kind == "image_edit" {
 		// Image jobs can return their first bytes only after rendering. Keep the
@@ -271,8 +275,9 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if generation {
 				pr.Out.Header.Set("Accept-Encoding", "identity")
 			}
-			if inject {
+			if inject || compactTicket {
 				pr.Out.Header.Set(turnstate.Header, snapshot.Token.Value)
+				outcome.StateInjected = true
 			}
 			if bootstrapResponse {
 				// Managed fallback has no usable card. A client may echo an old
@@ -374,7 +379,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if generation {
 			s.mu.Lock()
-			s.lastResponse = &ResponseModelObservation{Model: outcome.ResponseModel, At: time.Now().UTC(), Endpoint: outcome.Kind, Result: outcome.Result, Received: responseReceived}
+			s.lastResponse = &ResponseModelObservation{Model: outcome.ResponseModel, At: time.Now().UTC(), Endpoint: outcome.Kind, Result: outcome.Result, Received: responseReceived, StateInjected: outcome.StateInjected}
 			s.mu.Unlock()
 		}
 		if observeResponse && responseStream != nil {
@@ -426,7 +431,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			e.recordResponseCheck(s, checked, stateCheck, tracked.status, bootstrapResult)
 		}
-		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "response_model", outcome.ResponseModel, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode)
+		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "response_model", outcome.ResponseModel, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_injected", outcome.StateInjected, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode)
 	}()
 	proxy.ServeHTTP(tracked, r)
 	if !stateBound && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {

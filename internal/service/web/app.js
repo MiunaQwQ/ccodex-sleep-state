@@ -31,10 +31,11 @@ function responseModelLine(session) {
   const mismatch = Boolean(model && model !== session.model);
   const line = textNode("div", "", `response-model${mismatch ? " is-mismatch" : model ? " is-match" : " is-unknown"}`);
   const label = model || (observed ? observed.received ? "未返回可识别模型" : "未收到上游响应" : "等待回复");
-  line.append(textNode("span", `↳ 上游响应：${label}`));
+  line.append(textNode("span", `↳ ${observed?.endpoint === "compact" ? "压缩响应" : "上游响应"}：${label}`));
   if (model) line.append(textNode("span", mismatch ? "模型不一致" : "模型一致", "response-model-badge"));
+  if (observed) line.append(textNode("span", observed.state_injected ? "已带主票" : "未注入主票", "response-model-badge"));
   line.title = observed
-    ? `最近返回 · ${observed.endpoint === "compact" ? "远程压缩" : "正式回复"} · ${new Date(observed.at).toLocaleString()}。仅显示上游声明的模型名称。`
+    ? `最近返回 · ${observed.endpoint === "compact" ? "远程压缩" : "正式回复"} · ${new Date(observed.at).toLocaleString()}。${observed.state_injected ? "请求已注入当前主票及其来源节点。" : "本次未注入主票。"}仅显示上游声明的模型名称。`
     : "收到正式回复后显示；后台采集不会覆盖这里。";
   return line;
 }
@@ -52,7 +53,7 @@ function timingSummary() {
   $("failure-max-interval").setCustomValidity(c.failure_max_interval_seconds < c.failure_interval_seconds ? "最大间隔不得小于初始间隔" : "");
   const retryStart = c.failure_interval_seconds === 0 ? "首次失败立即重试一次，此后从 30 秒起翻倍等待" : `失败从 ${c.failure_interval_seconds} 秒起翻倍等待`;
   const cadence = round ? `默认轮次：每批最多尝试 ${t.max_probes_per_round} 个节点，单次最长 ${t.probe_timeout_seconds} 秒；不论有无主用，每批结束后等待 ${t.probe_cooldown_seconds} 秒；可手动随机换节点立即采集一次；节点每轮随机排序，不重复，全部可用节点走完后才开启下一轮。不叠加逐次退避和连续失败暂停。` : `${retryStart}，最多 ${c.failure_max_interval_seconds} 秒；连续失败 ${c.search_budget} 次暂停 ${c.search_pause_seconds} 秒。`;
-  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}${cadence}所有会话合计滚动一小时最多 ${c.hourly_budget} 次额外采集；登录拒绝或限流会暂停；模型容量不足继续下一节点。备用目标 ${c.standby_target} 张，主用加备用达到 ${c.standby_target+1} 张后停止；按取得顺序使用，出现空位才补。按轮次及至少 ${c.standby_spacing_seconds} 秒的错峰间隔补充后续备用；聊天期间也按上述节奏补采；无 AI 在途请求且空闲 ${c.idle_seconds} 秒后暂停，面板与模型列表不延长计时。`;
+  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}${cadence}所有会话自动采集合计滚动一小时最多 ${c.hourly_budget} 次；手动打票无等待且不占用此预算；登录拒绝或限流会暂停；模型容量不足继续下一节点。备用目标 ${c.standby_target} 张，主用加备用达到 ${c.standby_target+1} 张后停止；按取得顺序使用，出现空位才补。按轮次及至少 ${c.standby_spacing_seconds} 秒的错峰间隔补充后续备用；聊天期间也按上述节奏补采；无 AI 在途请求且空闲 ${c.idle_seconds} 秒后暂停，面板与模型列表不延长计时。`;
 }
 function fillTiming(t) {
   if (!t) return;
@@ -195,7 +196,7 @@ async function refreshStatus() {
     $("recent-requests").append(
       textNode(
         "div",
-        `${new Date(item.at).toLocaleTimeString()} · ${item.kind} · HTTP ${item.status} · ${item.duration_ms} ms · ${({completed:"完成",failed:"失败",unverified:"未确认完成",cancelled:"已取消",http_success:"接口已响应"})[item.result]||"仅HTTP记录"}${item.model && ["responses", "compact"].includes(item.endpoint) ? ` · 请求 ${item.model} → 上游 ${item.response_model || "未返回可识别模型"}${item.response_model && item.response_model !== item.model ? "（模型不一致）" : ""}` : ""}${item.error_code ? " · "+item.error_code : ""}${item.route_label ? " · "+item.route_label : ""}`,
+        `${new Date(item.at).toLocaleTimeString()} · ${item.kind} · HTTP ${item.status} · ${item.duration_ms} ms · ${({completed:"完成",failed:"失败",unverified:"未确认完成",cancelled:"已取消",http_success:"接口已响应"})[item.result]||"仅HTTP记录"}${item.model && ["responses", "compact"].includes(item.endpoint) ? ` · 请求 ${item.model} → 上游 ${item.response_model || "未返回可识别模型"}${item.response_model && item.response_model !== item.model ? "（模型不一致）" : ""} · ${item.state_injected ? "已带主票" : "未注入主票"}` : ""}${item.error_code ? " · "+item.error_code : ""}${item.route_label ? " · "+item.route_label : ""}`,
         "hint",
       ),
     );
@@ -346,7 +347,7 @@ async function refreshStatus() {
       }
       reasons.collecting = "正在补采；聊天回复与采集独立进行";
       const failures = c.cadence === "round" ? `${c.failures} 次（默认轮次）` : `${c.failures}/${c.search_budget} 次`;
-      detail.append(textNode("p", `全程序最近一小时额外采集 ${c.hourly_used}/${c.hourly_budget} 次；本会话连续失败 ${failures}。${reasons[c.reason] || c.reason}${!c.idle && c.wait_seconds > 0 ? `，约 ${duration(c.wait_seconds)} 后可采集（${stateTime(c.next_at)}）` : ""}。`, "hint"));
+      detail.append(textNode("p", `全程序最近一小时自动采集 ${c.hourly_used}/${c.hourly_budget} 次（不含手动打票）；本会话连续失败 ${failures}。${reasons[c.reason] || c.reason}${!c.idle && c.wait_seconds > 0 ? `，约 ${duration(c.wait_seconds)} 后可采集（${stateTime(c.next_at)}）` : ""}。`, "hint"));
     }
     if(session.state_events?.length) {
       const names={acquired_main:"取得主用",acquired_standby:"取得备用",promoted:"接替为主用",expired:"已到期",invalidated:"收到明确不合格结果，已撤下",source_suspended:"来源停用，暂停使用",source_resumed:"来源恢复，重新入队"};
@@ -357,9 +358,9 @@ async function refreshStatus() {
     const probe = session.last_probe_result;
     if (probe) detail.append(textNode("p", `最近主动采集：${stateTime(probe.at)} · ${routeName(probe.route)} · ${nodeResults[probe.result] || probe.result}${probe.length ? ` · 返回 ${probe.length} / 目标 ${probe.expected_length}` : ""}。此处是采集候选的结果，当前主用的核验请看“最近正式回复”。`, "hint"));
     if (session.id && state.injection_enabled) {
-      const randomOnce = textNode("button", "随机换节点采集一次", "secondary");
-      randomOnce.title = "跳过本地等待，随机选择另一个可用采集节点；保留主卡、聊天出口和固定设置。仍遵守上游暂停与小时预算。";
-      randomOnce.dataset.locked = String(["collecting", "auth_blocked", "rate_limited", "upstream_paused"].includes(session.phase) || ["collecting","pool_ready"].includes(session.collection?.reason));
+      const randomOnce = textNode("button", "手动打票 · 随机节点一次", "secondary");
+      randomOnce.title = "每点一次只打一次票，无冷却、不受每小时采集预算和暂停倒计时限制，也不占用自动采集预算。保留主卡、聊天出口和固定设置；主备满额或已有采集在进行时不可重复发起。";
+      randomOnce.dataset.locked = String(["collecting", "auth_blocked"].includes(session.phase) || ["collecting","pool_ready"].includes(session.collection?.reason));
       randomOnce.disabled = randomOnce.dataset.locked === "true";
       randomOnce.addEventListener("click", () => action(async () => {
         try { notice((await api("state/retry", {id:session.id, random_once:true})).message); }

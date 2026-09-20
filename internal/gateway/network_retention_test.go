@@ -97,7 +97,7 @@ func TestServerFailureDoesNotInvalidateState(t *testing.T) {
 	}
 }
 
-func TestRandomManualProbeSkipsOnlyLocalWaitAndKeepsMain(t *testing.T) {
+func TestRandomManualProbeKeepsMainAndAutomaticSchedule(t *testing.T) {
 	calls := 0
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; complete(w, fakeToken(10, 157)) }))
 	e.config.Collection = settings.DefaultCollection()
@@ -125,17 +125,16 @@ func TestRandomManualProbeSkipsOnlyLocalWaitAndKeepsMain(t *testing.T) {
 	if calls != 1 || before != after || s.state.Status(time.Now()).Standby != 1 || s.lastProbeResult.Route != other.ID || e.config.PinnedRoute != e.routes[0].ID {
 		t.Fatal("manual random changed main, pin or sent multiple probes")
 	}
-	if status := e.collection.Status(s.backupKey, time.Now(), e.config.Collection); status.HourlyUsed != 1 || status.WaitSeconds < 178 {
+	if status := e.collection.Status(s.backupKey, time.Now(), e.config.Collection); status.HourlyUsed != 0 || status.WaitSeconds < 178 {
 		t.Fatal("manual random erased budget or following wait")
 	}
 	e.config.Collection.HourlyBudget = 1
-	if err := e.RetryRandomState(context.Background(), s.id); err == nil || calls != 1 {
-		t.Fatal("manual random bypassed hourly budget")
-	}
-	e.config.Collection.HourlyBudget = 30
 	s.upstreamPause = time.Now().Add(time.Minute)
-	if err := e.RetryRandomState(context.Background(), s.id); err == nil || calls != 1 {
-		t.Fatal("manual random bypassed upstream pause")
+	// The only alternative can be retried immediately, even though the
+	// repeated synthetic token is rejected as a duplicate after dispatch.
+	_ = e.RetryRandomState(context.Background(), s.id)
+	if calls != 2 {
+		t.Fatal("manual ticket was blocked by a timer or the previous node")
 	}
 }
 

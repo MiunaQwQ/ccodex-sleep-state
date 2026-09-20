@@ -11,11 +11,12 @@ import (
 // Upstream-declared metadata from the latest finished forwarding attempt.
 // Missing metadata is recorded too, so a previous model is never shown as new.
 type ResponseModelObservation struct {
-	Model    string    `json:"model,omitempty"`
-	At       time.Time `json:"at"`
-	Endpoint string    `json:"endpoint"`
-	Result   string    `json:"result"`
-	Received bool      `json:"received"`
+	Model         string    `json:"model,omitempty"`
+	At            time.Time `json:"at"`
+	Endpoint      string    `json:"endpoint"`
+	Result        string    `json:"result"`
+	Received      bool      `json:"received"`
+	StateInjected bool      `json:"state_injected"`
 }
 
 func declaredResponseModel(data []byte, eventName string) string {
