@@ -51,6 +51,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	outcome := outcomeFor(r)
+	r = WithOutcome(r, outcome)
 	outcome.Kind = endpointKind(r.URL.Path)
 	outcome.Result = "unverified"
 	model := e.settings().SelectedModel()
@@ -128,13 +129,18 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if approvalReview {
 		outcome.Kind = "approval_review"
 	}
-	outcome.Model = model
+	if generation {
+		outcome.Model = model
+	}
+	publishProgress(r)
 	s, err := e.borrow(r.Header, model)
 	if err != nil {
 		fail(w, http.StatusUnauthorized, "authentication_required", "Log in with Codex before using this service.")
 		return
 	}
 	defer release(s)
+	outcome.SessionID = s.id
+	publishProgress(r)
 	if generation {
 		s.mu.Lock()
 		s.lastAI = time.Now()
@@ -212,8 +218,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if inject && usable || compactBound {
 		route = snapshot.Route
 	}
-	// A state and its source route form one immutable request snapshot. User
-	// egress preferences apply only when no state is being injected.
+	// A ticket and its current egress form one immutable request snapshot.
+	// An explicit main-ticket switch changes future snapshots only.
 	stateBound := inject && usable || compactTicket
 	if !stateBound && !compactBound && (e.settings().EgressMode == "random" || e.settings().EgressMode == "fixed") {
 		selected, err := e.selectEgressFor(snapshot.Route, false, approvalReview)
@@ -289,9 +295,12 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				pr.Out.Header.Set("Accept-Encoding", "identity")
 			}
 		},
-		Transport: transport, FlushInterval: -1, ErrorLog: log.New(io.Discard, "", 0),
+		Transport: progressTransport{base: transport, request: r}, FlushInterval: -1, ErrorLog: log.New(io.Discard, "", 0),
 		ModifyResponse: func(resp *http.Response) error {
 			responseReceived = true
+			outcome.UpstreamAt = time.Now().UTC()
+			outcome.UpstreamStatus = resp.StatusCode
+			publishProgress(r)
 			resp.Header.Del("Set-Cookie")
 			if e.settings().IsRelay() || approvalReview {
 				resp.Header.Del(turnstate.Header)

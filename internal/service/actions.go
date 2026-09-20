@@ -216,6 +216,12 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		c.nodeTestAction(w, r)
 		return
 	}
+	if r.URL.Path == "/admin/api/state/switch-route" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		c.switchStateRouteAction(w, r)
+		return
+	}
 	if r.URL.Path == "/admin/api/state/discard" {
 		c.mu.RLock()
 		defer c.mu.RUnlock()

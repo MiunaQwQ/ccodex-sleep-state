@@ -220,23 +220,28 @@ func (c *control) checkManaged() error {
 	return nil
 }
 func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	observed := &observedResponse{ResponseWriter: w}
-	started := time.Now()
+	started := time.Now().UTC()
+	id := c.history.begin(r, started)
+	observed := &observedResponse{ResponseWriter: w, onWrite: func(n int) { c.history.written(id, n, time.Now().UTC()) }}
 	outcome := &gateway.RequestOutcome{}
 	r = gateway.WithOutcome(r, outcome)
+	r = gateway.WithProgress(r, func(v gateway.RequestOutcome) { c.history.progress(id, v) })
 	defer func() {
+		aborted := recover()
 		status := observed.status
 		if status == 0 {
 			status = 200
 		}
-		kind := requestKind(r.URL.Path)
-		if outcome.Kind == "compact" {
-			kind = "远程压缩"
+		if r.Context().Err() != nil {
+			outcome.Result = "cancelled"
+		} else if observed.writeFailed || aborted != nil {
+			outcome.Result = "failed"
+			outcome.ErrorCode = "response_interrupted"
 		}
-		if outcome.Kind == "approval_review" {
-			kind = "自动审批"
+		c.history.finish(id, requestEvent{Kind: requestKind(r.URL.Path), Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC(), RequestOutcome: *outcome})
+		if aborted != nil {
+			panic(aborted)
 		}
-		c.history.record(requestEvent{Kind: kind, Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC(), RequestOutcome: *outcome})
 	}()
 	w = observed
 	c.mu.RLock()

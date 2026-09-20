@@ -11,15 +11,20 @@ type Snapshot struct {
 	Token      Token
 	Route      int
 	Version    uint64
+	// Route is the current egress. SourceRoute preserves the acquisition node
+	// after an explicit manual switch; old snapshots remain immutable.
+	SourceRoute int
+	ManualRoute bool
 }
 
 // PersistedSnapshot is the private, opaque form used by the local backup.
 // RouteID is stable across reloads; the in-memory route index is not.
 type PersistedSnapshot struct {
-	AcquiredAt time.Time `json:"acquired_at,omitempty"`
-	Token      string    `json:"token"`
-	RouteID    string    `json:"route_id"`
-	Issued     time.Time `json:"issued"`
+	AcquiredAt    time.Time `json:"acquired_at,omitempty"`
+	Token         string    `json:"token"`
+	RouteID       string    `json:"route_id"`
+	Issued        time.Time `json:"issued"`
+	SourceRouteID string    `json:"source_route_id,omitempty"`
 }
 
 // Persisted is intentionally limited to state candidates. Credentials and
@@ -250,16 +255,17 @@ func (s *Store) exportLocked(now time.Time, routeID func(int) string) Persisted 
 	s.promote(now)
 	result := Persisted{SavedAt: now.UTC(), Discarded: append([]DiscardedState(nil), s.discarded...)}
 	if s.policy.Accept(s.active.Token, now) {
-		result.Active = &PersistedSnapshot{Token: s.active.Token.Value, RouteID: routeID(s.active.Route), Issued: s.active.Token.Issued, AcquiredAt: s.active.AcquiredAt}
+		v := persistedSnapshot(s.active, routeID)
+		result.Active = &v
 	}
 	for _, candidate := range s.standby {
 		if s.policy.Accept(candidate.Token, now) {
-			result.Standby = append(result.Standby, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued, AcquiredAt: candidate.AcquiredAt})
+			result.Standby = append(result.Standby, persistedSnapshot(candidate, routeID))
 		}
 	}
 	for _, candidate := range s.parked {
 		if s.policy.Accept(candidate.Token, now) {
-			result.Parked = append(result.Parked, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued, AcquiredAt: candidate.AcquiredAt})
+			result.Parked = append(result.Parked, persistedSnapshot(candidate, routeID))
 		}
 	}
 	return result
@@ -281,7 +287,15 @@ func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int
 		if err != nil || !s.policy.Accept(t, now) || s.isDiscarded(t.Fingerprint, now) {
 			return Snapshot{}, false
 		}
-		return Snapshot{Token: t, Route: route, AcquiredAt: raw.AcquiredAt}, true
+		v := Snapshot{Token: t, Route: route, AcquiredAt: raw.AcquiredAt}
+		if raw.SourceRouteID != "" {
+			source, exists := routeIndex(raw.SourceRouteID)
+			if !exists {
+				return Snapshot{}, false
+			}
+			v.SourceRoute, v.ManualRoute = source, true
+		}
+		return v, true
 	}
 	if p.Active != nil {
 		if active, ok := add(*p.Active); ok {

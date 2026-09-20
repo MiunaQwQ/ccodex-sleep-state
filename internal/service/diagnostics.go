@@ -11,40 +11,37 @@ import (
 // It survives route reloads so an empty model session list never means no traffic.
 type requestEvent struct {
 	gateway.RequestOutcome
-	Kind       string    `json:"kind"`
-	Status     int       `json:"status"`
-	DurationMS int64     `json:"duration_ms"`
-	At         time.Time `json:"at"`
+	Kind        string    `json:"kind"`
+	Status      int       `json:"status"`
+	DurationMS  int64     `json:"duration_ms"`
+	At          time.Time `json:"at"`
+	ID          string    `json:"id,omitempty"`
+	Phase       string    `json:"phase,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitzero"`
+	FirstByteAt time.Time `json:"first_byte_at,omitzero"`
+	Bytes       int64     `json:"bytes"`
 }
 type requestHistory struct {
 	mu            sync.Mutex
 	total, failed uint64
 	recent        []requestEvent
+	active        map[string]requestEvent
+	groups        map[string]*conversationTraffic
+	requestGroups map[string]string
 }
 
-func (h *requestHistory) record(e requestEvent) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.total++
-	if e.Status >= 400 || e.Result == "failed" {
-		h.failed++
-	}
-	if len(h.recent) == 30 {
-		copy(h.recent, h.recent[1:])
-		h.recent = h.recent[:29]
-	}
-	h.recent = append(h.recent, e)
-}
 func (h *requestHistory) snapshot() map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	recent := append([]requestEvent{}, h.recent...)
-	return map[string]any{"total": h.total, "failed": h.failed, "recent": recent}
+	return map[string]any{"total": h.total, "failed": h.failed, "recent": recent, "active": len(h.active), "conversations": h.conversationsLocked(time.Now()), "conversation_limit": conversationLimit, "recent_per_conversation": conversationRecentLimit}
 }
 
 type observedResponse struct {
 	http.ResponseWriter
-	status int
+	status      int
+	onWrite     func(int)
+	writeFailed bool
 }
 
 func (w *observedResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -64,13 +61,22 @@ func (w *observedResponse) Write(p []byte) (int, error) {
 	if w.status == 0 {
 		w.WriteHeader(200)
 	}
-	return w.ResponseWriter.Write(p)
+	n, err := w.ResponseWriter.Write(p)
+	if err != nil {
+		w.writeFailed = true
+	}
+	if w.onWrite != nil {
+		w.onWrite(n)
+	}
+	return n, err
 }
 func (w *observedResponse) Flush() {
 	if w.status == 0 {
 		w.WriteHeader(200)
 	}
-	_ = http.NewResponseController(w.ResponseWriter).Flush()
+	if err := http.NewResponseController(w.ResponseWriter).Flush(); err != nil {
+		w.writeFailed = true
+	}
 }
 func requestKind(path string) string {
 	switch path {

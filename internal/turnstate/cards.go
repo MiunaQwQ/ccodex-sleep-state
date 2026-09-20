@@ -14,6 +14,10 @@ type Card struct {
 	UsableUntil      time.Time `json:"usable_until"`
 	RemainingSeconds int       `json:"remaining_seconds"`
 	AgeSeconds       int       `json:"age_seconds"`
+	Version          uint64    `json:"version"`
+	SourceRouteID    string    `json:"source_route_id"`
+	SourceRouteLabel string    `json:"source_route_label"`
+	ManualRoute      bool      `json:"manual_route"`
 }
 
 func (s *Store) Cards(now time.Time, route func(int) (string, string)) []Card {
@@ -31,7 +35,11 @@ func (s *Store) Cards(now time.Time, route func(int) (string, string)) []Card {
 		if !v.AcquiredAt.IsZero() {
 			age = max(0, int(now.Sub(v.AcquiredAt).Seconds()))
 		}
-		result = append(result, Card{v.Token.Fingerprint, role, id, label, v.AcquiredAt, v.Token.Issued, expires, expires.Add(-30 * time.Second), max(0, int(expires.Sub(now).Seconds())), age})
+		sourceID, sourceLabel := id, label
+		if v.ManualRoute {
+			sourceID, sourceLabel = route(v.SourceRoute)
+		}
+		result = append(result, Card{ID: v.Token.Fingerprint, Role: role, RouteID: id, RouteLabel: label, AcquiredAt: v.AcquiredAt, IssuedAt: v.Token.Issued, ExpiresAt: expires, UsableUntil: expires.Add(-30 * time.Second), RemainingSeconds: max(0, int(expires.Sub(now).Seconds())), AgeSeconds: age, Version: v.Version, SourceRouteID: sourceID, SourceRouteLabel: sourceLabel, ManualRoute: v.ManualRoute})
 	}
 	add(s.active, "active")
 	for _, candidate := range s.standby {

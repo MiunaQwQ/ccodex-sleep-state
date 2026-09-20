@@ -36,7 +36,7 @@ function responseModelLine(session) {
   if (model) line.append(textNode("span", mismatch ? "模型不一致" : "模型一致", "response-model-badge"));
   if (observed) line.append(textNode("span", observed.state_injected ? "已带主票" : "未注入主票", "response-model-badge"));
   line.title = observed
-    ? `最近返回 · ${observed.endpoint === "compact" ? "远程压缩" : "正式回复"} · ${new Date(observed.at).toLocaleString()}。${observed.state_injected ? "请求已注入当前主票及其来源节点。" : "本次未注入主票。"}仅显示上游声明的模型名称。`
+    ? `最近返回 · ${observed.endpoint === "compact" ? "远程压缩" : "正式回复"} · ${new Date(observed.at).toLocaleString()}。${observed.state_injected ? "请求已注入本次主票及其当前节点。" : "本次未注入主票。"}仅显示上游声明的模型名称。`
     : "收到正式回复后显示；后台采集不会覆盖这里。";
   return line;
 }
@@ -179,6 +179,7 @@ async function refreshStatus() {
     $("fallback-select").value = state.state_fallback || "strict";
   if (!timingDirty) fillTiming(state.timing);
   const traffic = state.traffic || { total: 0, failed: 0, recent: [] };
+  renderConversations(traffic);
   $("step-config").textContent = state.configured_codex
     ? "已接入 · 可检查或修复"
     : "未接入 · 点这里处理";
@@ -232,7 +233,7 @@ async function refreshStatus() {
       row.dataset.sessionModel = session.model;
       const detail = textNode("div", "", "session-detail");
       const heading = textNode("div", "", "session-heading");
-      heading.append(textNode("strong", `会话 ${number} · ${session.model}`, "session-title"), textNode("span", "等待首次请求", "session-badge"));
+      heading.append(textNode("strong", `票池 ${number} · ${session.model}`, "session-title"), textNode("span", "等待首次请求", "session-badge"));
       heading.insertBefore(responseModelLine(session), heading.children[1]);
       detail.append(heading, textNode("p", "主用 0 · 备用 0 · 暂无失败记录", "session-empty"));
       row.append(detail);
@@ -254,7 +255,7 @@ async function refreshStatus() {
     row.dataset.sessionModel = session.model;
     const heading = textNode("div", "", "session-heading");
     const phaseNames = {ready:"主用未到期",search_queued:"等待采集",upstream_paused:"上游暂停",collecting:"正在采集",waiting_for_state:"等待主用",auth_blocked:"登录 / 权限异常",rate_limited:"上游限流"};
-    heading.append(textNode("strong", `会话 ${number} · ${session.model}`, "session-title"), textNode("span", phaseNames[session.phase] || phases[session.phase] || session.phase, `session-badge ${session.usable ? "is-ready" : "is-pending"}`));
+    heading.append(textNode("strong", `票池 ${number} · ${session.model}`, "session-title"), textNode("span", phaseNames[session.phase] || phases[session.phase] || session.phase, `session-badge ${session.usable ? "is-ready" : "is-pending"}`));
     heading.append(textNode("span", `目标 ${session.expected_length || "—"} · 备用 ${session.standby || 0}`, "session-meta"));
     heading.insertBefore(responseModelLine(session), heading.children[1]);
     row.append(heading);
@@ -285,10 +286,11 @@ async function refreshStatus() {
       left.dataset.compactTime = "true";
       cardHeading.append(left);
       const source = textNode("p", card.route_label || card.route_id, "state-source");
-      source.title = `来源节点：${card.route_label || card.route_id}`;
+      source.title = `当前节点：${card.route_label || card.route_id}`;
       const times = textNode("p", `${stateClock(card.acquired_at)} 取得 · ${stateClock(card.expires_at)} 预计到期`, "state-times");
       times.title = `取得：${stateTime(card.acquired_at)}；本地预计到期：${stateTime(card.expires_at)}`;
       item.append(cardHeading, source, times);
+      if (card.manual_route) item.append(textNode("p", `已手动切换 · 采集来源：${card.source_route_label || card.source_route_id}`, "state-evidence"));
       if (card.role === "active") {
         const checked = session.last_state_check;
         const sameCard = checked?.state_id === card.id;
@@ -306,6 +308,12 @@ async function refreshStatus() {
           discard.title = "只丢弃这张票，保留来源节点和其他票；已经发出的请求继续完成。";
           discard.addEventListener("click", () => { discardConfirmations.add(discardKey); renderDiscardActions(); });
           cardActions.append(discard);
+          if (card.role === "active") {
+            const switchRoute = textNode("button", "切换节点", "secondary");
+            switchRoute.setAttribute("aria-label", `切换主票 ${card.id.slice(0,8)} 的节点`);
+            switchRoute.addEventListener("click", () => openRouteSwitch(session,card));
+            cardActions.append(switchRoute);
+          }
           return;
         }
         const effect = card.role === "active" ? "有备用按顺序接替，无备用按原规则补采。" : "主票和其他备用票保持不变。";
@@ -338,7 +346,7 @@ async function refreshStatus() {
     }
     if ((session.states || []).length) {
       row.append(cards);
-      detail.append(textNode("p", "state 使用时固定来源节点；到期前 30 秒停止接入新请求。", "hint"));
+      detail.append(textNode("p", "默认使用采集来源节点，也可保留主票手动切换；到期前 30 秒停止接入新请求。", "hint"));
     } else {
       const boot = session.last_state_check?.bootstrap;
       const awaiting = session.last_state_check?.result === "header_accepted" && boot && boot !== "saved_active";
@@ -641,7 +649,7 @@ function renderNodeResults() {
    if (!record) continue;found=true;
    const active=session.active_route===record.route ? " · 当前使用" : "";
    const number = (state.supported_models || []).indexOf(session.model)+1;
-   element.append(textNode("p",`会话 ${number} · ${session.model}${active} · ${nodeResults[record.result] || record.result}${record.length ? ` · 返回 ${record.length} / 目标 ${record.expected_length}` : ""}`,record.result==="accepted" ? "node-good" : "node-pending"));
+   element.append(textNode("p",`票池 ${number} · ${session.model}${active} · ${nodeResults[record.result] || record.result}${record.length ? ` · 返回 ${record.length} / 目标 ${record.expected_length}` : ""}`,record.result==="accepted" ? "node-good" : "node-pending"));
    if (record.pool_state === "failed") {
     element.append(textNode("p","连接失败 · 自动采集需手动恢复，已有卡不删除","node-pending"));
     const restore=textNode("button","手动恢复节点","secondary");restore.addEventListener("click",()=>action(async()=>{notice((await api("nodes/resume",{session_id:session.id,route_id:record.route})).message);await refresh();}));element.append(restore);
