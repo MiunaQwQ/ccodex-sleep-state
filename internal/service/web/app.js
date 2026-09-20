@@ -198,7 +198,7 @@ async function refreshStatus() {
     $("recent-requests").append(
       textNode(
         "div",
-        `${new Date(item.at).toLocaleTimeString()} · ${item.kind} · HTTP ${item.status} · ${item.duration_ms} ms · ${({completed:"完成",failed:"失败",unverified:"未确认完成",cancelled:"已取消",http_success:"接口已响应"})[item.result]||"仅HTTP记录"}${item.model && ["responses", "compact"].includes(item.endpoint) ? ` · 请求 ${item.model} → 上游 ${item.response_model || "未返回可识别模型"}${item.response_model && item.response_model !== item.model ? "（模型不一致）" : ""} · ${item.state_injected ? "已带主票" : "未注入主票"}` : ""}${item.error_code ? " · "+item.error_code : ""}${item.route_label ? " · "+item.route_label : ""}`,
+        `${new Date(item.at).toLocaleTimeString()} · ${item.kind} · HTTP ${item.status} · ${item.duration_ms} ms · ${({completed:"完成",failed:"失败",unverified:"未确认完成",cancelled:"已取消",http_success:"接口已响应"})[item.result]||"仅HTTP记录"}${item.model && ["responses", "compact"].includes(item.endpoint) ? ` · 请求 ${item.model} → 上游 ${item.response_model || "未返回可识别模型"}${item.response_model && item.response_model !== item.model ? "（模型不一致）" : ""} · ${item.state_injected ? "已带主票" : "未注入主票"}` : ""}${item.termination_reason ? " · "+(trafficTerminationNames[item.termination_reason] || item.termination_reason) : ""}${item.error_code ? " · "+item.error_code : ""}${item.route_label ? " · "+item.route_label : ""}`,
         "hint",
       ),
     );

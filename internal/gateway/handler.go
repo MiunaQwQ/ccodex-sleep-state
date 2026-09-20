@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -376,11 +377,36 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if responseStream != nil {
 			outcome.ResponseModel = responseStream.responseModel
+			outcome.CompletionObserved = responseStream.protocolComplete()
+			outcome.CompletionForwarded = responseStream.completionForwarded(tracked.written)
 		}
-		if r.Context().Err() != nil {
+		switch {
+		case responseStream != nil && responseStream.protocolFailure != nil:
+			outcome.Result = "failed"
+			outcome.TerminationReason = "upstream_failed"
+		case outcome.CompletionForwarded:
+			outcome.Result = "completed"
+			outcome.TerminationReason = "response_complete"
+			if r.Context().Err() != nil {
+				outcome.TerminationReason = "closed_after_complete"
+			}
+		case r.Context().Err() != nil:
 			outcome.Result = "cancelled"
-		} else if responseStream != nil {
+			outcome.TerminationReason = "client_disconnected"
+			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+				outcome.TerminationReason = "request_timeout"
+			}
+		case tracked.writeFailed:
+			outcome.Result = "failed"
+			outcome.ErrorCode = "response_write_failed"
+			outcome.TerminationReason = "downstream_write_failed"
+		case responseStream != nil:
 			outcome.Result = responseStream.outcome()
+			if outcome.Result == "failed" {
+				outcome.TerminationReason = "upstream_stream_interrupted"
+			}
+		}
+		if responseStream != nil {
 			if failure, ok := responseStream.failure.(*probeStreamError); ok {
 				outcome.ErrorCode = failure.kind
 				if !approvalReview && (failure.status == 401 || failure.status == 403 || failure.status == 429) {
@@ -442,7 +468,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			e.recordResponseCheck(s, checked, stateCheck, tracked.status, bootstrapResult)
 		}
-		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "response_model", outcome.ResponseModel, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_injected", outcome.StateInjected, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode)
+		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "response_model", outcome.ResponseModel, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_injected", outcome.StateInjected, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode, "completion_observed", outcome.CompletionObserved, "completion_forwarded", outcome.CompletionForwarded, "termination_reason", outcome.TerminationReason)
 	}()
 	proxy.ServeHTTP(tracked, r)
 	if !stateBound && !approvalReview && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {
@@ -478,8 +504,10 @@ func fail(w http.ResponseWriter, status int, code, message string) {
 
 type statusWriter struct {
 	http.ResponseWriter
-	status int
-	wrote  bool
+	status      int
+	wrote       bool
+	written     int64
+	writeFailed bool
 }
 
 func (w *statusWriter) WriteHeader(status int) {
@@ -493,7 +521,15 @@ func (w *statusWriter) Write(p []byte) (int, error) {
 	if !w.wrote {
 		w.WriteHeader(200)
 	}
-	return w.ResponseWriter.Write(p)
+	n, err := w.ResponseWriter.Write(p)
+	if err != nil || n != len(p) {
+		w.writeFailed = true
+	} else if !w.writeFailed {
+		// Keep the successful prefix: a later failed write must not erase
+		// a completion event already forwarded in full.
+		w.written += int64(n)
+	}
+	return n, err
 }
 func (w *statusWriter) Flush() {
 	if !w.wrote {

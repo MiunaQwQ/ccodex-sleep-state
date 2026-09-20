@@ -8,18 +8,21 @@ import (
 
 // Metadata shared with the local request history. Never stores response prose.
 type RequestOutcome struct {
-	Kind           string    `json:"endpoint,omitempty"`
-	Result         string    `json:"result,omitempty"`
-	ErrorCode      string    `json:"error_code,omitempty"`
-	RouteID        string    `json:"route_id,omitempty"`
-	RouteLabel     string    `json:"route_label,omitempty"`
-	Model          string    `json:"model,omitempty"`
-	ResponseModel  string    `json:"response_model,omitempty"`
-	StateInjected  bool      `json:"state_injected"`
-	SessionID      string    `json:"ticket_session_id,omitempty"`
-	DispatchedAt   time.Time `json:"dispatched_at,omitzero"`
-	UpstreamAt     time.Time `json:"upstream_at,omitzero"`
-	UpstreamStatus int       `json:"upstream_status,omitempty"`
+	Kind                string    `json:"endpoint,omitempty"`
+	Result              string    `json:"result,omitempty"`
+	ErrorCode           string    `json:"error_code,omitempty"`
+	RouteID             string    `json:"route_id,omitempty"`
+	RouteLabel          string    `json:"route_label,omitempty"`
+	Model               string    `json:"model,omitempty"`
+	ResponseModel       string    `json:"response_model,omitempty"`
+	StateInjected       bool      `json:"state_injected"`
+	SessionID           string    `json:"ticket_session_id,omitempty"`
+	DispatchedAt        time.Time `json:"dispatched_at,omitzero"`
+	UpstreamAt          time.Time `json:"upstream_at,omitzero"`
+	UpstreamStatus      int       `json:"upstream_status,omitempty"`
+	CompletionObserved  bool      `json:"completion_observed"`
+	CompletionForwarded bool      `json:"completion_forwarded"`
+	TerminationReason   string    `json:"termination_reason,omitempty"`
 }
 type progressKey struct{}
 

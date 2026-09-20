@@ -76,6 +76,8 @@ type bootstrapStream struct {
 	lineLength                int
 	oversized, eof, completed bool
 	failure                   error
+	protocolFailure           error
+	readBytes, terminalBytes  int64
 }
 
 func (b *bootstrapStream) inspect() {
@@ -83,8 +85,12 @@ func (b *bootstrapStream) inspect() {
 		b.inspectResponseModel()
 		done, err := probeStreamOutcome(b.event)
 		b.completed = b.completed || done
+		if done && b.terminalBytes == 0 {
+			b.terminalBytes = b.readBytes
+		}
 		if err != nil {
 			b.failure = err
+			b.protocolFailure = err
 		}
 	}
 	b.event = b.event[:0]
@@ -100,6 +106,7 @@ func (b *bootstrapStream) Read(p []byte) (int, error) {
 		}
 	}
 	for _, ch := range p[:n] {
+		b.readBytes++
 		if !b.oversized {
 			if len(b.event) < 1<<20 {
 				b.event = append(b.event, ch)
@@ -132,17 +139,29 @@ func (b *bootstrapStream) Read(p []byte) (int, error) {
 			}
 			if json.Unmarshal(b.jsonData, &response) == nil && (response.Object == "response" && response.Status == "completed" || response.Object == "response.compaction" && len(response.Output) > 0 && response.Status != "failed") && (len(response.Error) == 0 || string(response.Error) == "null") {
 				b.completed = true
+				b.terminalBytes = b.readBytes
 			}
 			if len(response.Error) > 0 && string(response.Error) != "null" || response.Status == "failed" || response.Status == "incomplete" {
 				payload, _ := json.Marshal(map[string]any{"type": "response.failed", "error": response.Error})
 				_, b.failure = probeStreamOutcome(append(append([]byte("data: "), payload...), []byte("\n\n")...))
+				b.protocolFailure = b.failure
 			}
 			b.jsonData = nil
 		}
-	} else if err != nil {
+	} else if err != nil && b.protocolFailure == nil {
 		b.failure = err
 	}
 	return n, err
+}
+
+// A protocol completion is independent of the socket's EOF. Codex may close
+// its HTTP stream immediately after consuming the completion event. Count it
+// as forwarded only once that event's entire byte range was written.
+func (b *bootstrapStream) protocolComplete() bool {
+	return b.completed && b.terminalBytes > 0 && !b.oversized && !b.jsonOversized && b.protocolFailure == nil
+}
+func (b *bootstrapStream) completionForwarded(written int64) bool {
+	return b.protocolComplete() && written >= b.terminalBytes
 }
 
 func (b *bootstrapStream) complete() bool {

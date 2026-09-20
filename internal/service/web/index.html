@@ -15,7 +15,7 @@
       <div class="brand">
         <span class="mark" aria-hidden="true">S</span>
         <div>
-          <strong>Sleep State</strong><small>本地连接管理 · r20</small>
+          <strong>Sleep State</strong><small>本地连接管理 · r21</small>
         </div>
       </div>
       <span class="local"><i></i> 本机私有</span
@@ -62,7 +62,7 @@
             <section class="card injection-card"><div class="row"><div><h2>State 注入</h2><p>使用当前主牌与它的当前节点</p></div><button id="toggle" class="ios-switch" role="switch" aria-checked="false" aria-label="State 注入">读取中…</button></div><p id="injection-help" class="hint">正在读取注入状态…</p><details class="inline-help"><summary>关闭后会怎样</summary><p class="hint">关闭后仍通过所选出口转发，但不再采集或替换 state。正在进行的回复不会被打断，上游登录、权限及限流规则仍然生效。</p></details></section>
             <section class="card policy-card"><h2>主用策略</h2><p>选择主牌的更新方式</p><div class="inline-form"><select id="state-policy" aria-label="主用策略"><option value="on_demand">固定主用 · 到期再换</option><option value="standby">主用与备用 · 按序接替</option></select><button id="save-state-policy" class="secondary">保存</button></div><p class="hint">备用数量和补采节奏可在连接设置中调整。</p><p id="state-policy-result" role="status"></p></section>
           </div>
-          <section class="conversation-section"><div class="section-heading"><div><h2>对话请求</h2><p id="conversation-summary">等待请求…</p></div></div><p class="hint">按客户端对话标识分组。生成需收到完整结束标记才记为完整返回，HTTP 200 本身不代表成功。仅保留本次启动的最近 128 组、每组 50 条结束记录及所有在途请求，不保存对话内容。</p><div id="conversations" class="stack"></div></section>
+          <section class="conversation-section"><div class="section-heading"><div><h2>对话请求</h2><p id="conversation-summary">等待请求…</p></div></div><p class="hint">空闲 10 分钟后自动移出页面，也可点击 × 手动移除。有新请求时重新出现，票池不受影响。展开卡片可看请求明细。</p><div id="conversations" class="stack"></div></section>
           <details class="card request-history"><summary><span>最近请求</span><span id="traffic-summary" class="hint"></span></summary><p id="request-slots" class="hint"></p><div id="recent-requests" class="stack"></div></details>
           <details class="card setup-guide" id="setup-guide"><summary>接入与环境检查</summary>
             <div class="quick-start"><div><strong id="next-step-title">先连接服务</strong><p id="next-step-help">正在检查当前连接。</p></div><button id="next-step-action" class="secondary">查看会话</button></div>
@@ -410,7 +410,7 @@
     </div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <footer>
-      Sleep State · 本地管理 · r20
+      Sleep State · 本地管理 · r21
     </footer>
   <dialog id="route-switch-dialog" class="route-switch-dialog"><form id="route-switch-form"><h2>保留主票，切换节点</h2><p id="switch-ticket-label"></p><p id="switch-current-route" class="hint"></p><label for="switch-route-select">后续带票请求使用的节点</label><select id="switch-route-select" required></select><p class="hint">此账号、此模型共用的主票会一起切换。票号、有效期和备用票保留，在途请求继续使用原节点。跨节点后是否可用，以实际请求返回为准；切换本身不会发送测试请求。</p><p id="switch-route-result" class="traffic-error" role="status"></p><div class="actions"><button type="button" id="cancel-route-switch" class="quiet">取消</button><button type="submit" id="confirm-route-switch">保留主票并切换</button></div></form></dialog>
   </body>

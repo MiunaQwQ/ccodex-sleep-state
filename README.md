@@ -6,7 +6,10 @@
 
 [下载发布版](https://github.com/NanSsye/ccodex-sleep-state/releases) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NanSsye/ccodex-sleep-state/issues) · [上游项目](https://github.com/gylive/ccodex-sleep-state)
 
-## 当前版本：r20
+## 当前版本：r21
+
+- **紧凑对话卡片**：折叠显示模型、当前状态、请求次数和实际节点，展开查看明细。没有在途请求且空闲 10 分钟后自动移出页面；点击右上角 × 可手动移除，有新请求时自动重现。
+- **修正取消误判**：完成事件已完整写出后，客户端正常关闭连接仍记为完整返回；真正中断、请求超时、服务停止和上游失败分开显示。
 
 - **按对话查看请求**：请求一到达就计数，按客户端对话标识分组，显示等待上游、正在返回、完整返回、失败和取消；展开可看实际节点、主票注入、请求/响应模型、耗时、响应头时间和写出字节数。
 - **保留主票切换节点**：点击主票旁「切换节点」，选择其他可用节点。主票票号、有效期、来源记录和备用票不变；后续带票生成及压缩使用新节点，在途请求继续使用旧节点。切换会保存到本地。
@@ -38,7 +41,7 @@
 
 「模型票池」按账号和模型共用票；「对话请求」按客户端的 `thread_id` / `session_id` 或 turn metadata 中的对话 UUID 分组。同一模型的不同对话不会被当作一个对话；没有有效标识时明确列入未识别请求，不能据此判断实际对话数量。
 
-对话记录保存在内存，切换节点不清空，重启会清空；保留最近 128 个分组、每组最近 50 条结束记录，以及所有在途请求。未收到完整结束标记的生成不会仅凭 HTTP 200 标为成功。记录不包含聊天正文、完整票或凭据，响应模型是上游声明，不代表独立验证了底层模型。
+对话记录保存在内存，切换节点不清空，重启会清空；保留最近 128 个分组、每组最近 50 条结束记录，以及所有在途请求。生成需完整写出结束标记才记为完整返回，HTTP 200 本身不代表成功。自动清理和手动移除只影响卡片展示，保留本次启动的诊断统计，不停止请求或丢弃票；手动移除记录保存在当前浏览器。10 分钟从最近请求开始或结束算起，在途请求不自动移除。记录不包含聊天正文、完整票或凭据，响应模型是上游声明，不代表独立验证了底层模型。
 
 主票切换影响共用该账号、该模型票池的后续带票请求，优先于普通无票出口设置。切换不发送探测、不延长票的有效期、不改动备用票，也不会自动重放失败请求。节点需已启用且没有标记为失败；跨节点后的可用性仍以实际响应为准，必要时可以再次切换。切换后出现新的无效 state，仍按原有主备规则处理；旧节点在途请求的迟到结果不能撤掉新版本主票。
 
@@ -46,12 +49,12 @@
 
 前提是 Codex 已完成自己的登录或 API 配置。下载 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 中与电脑匹配的文件，完整解压：
 
-| 电脑 | r20 文件 | 启动入口 |
+| 电脑 | r21 文件 | 启动入口 |
 | --- | --- | --- |
-| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r20-windows-amd64.zip` | `start.cmd` |
-| Windows ARM64 | `ccodex-sleep-state-r20-windows-arm64.zip` | `start.cmd` |
-| Mac Apple Silicon | `ccodex-sleep-state-r20-darwin-arm64.tar.gz` | `start.command` |
-| Mac Intel | `ccodex-sleep-state-r20-darwin-amd64.tar.gz` | `start.command` |
+| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r21-windows-amd64.zip` | `start.cmd` |
+| Windows ARM64 | `ccodex-sleep-state-r21-windows-arm64.zip` | `start.cmd` |
+| Mac Apple Silicon | `ccodex-sleep-state-r21-darwin-arm64.tar.gz` | `start.command` |
+| Mac Intel | `ccodex-sleep-state-r21-darwin-amd64.tar.gz` | `start.command` |
 
 1. 双击对应启动脚本，保持终端窗口运行。
 2. 浏览器打开本地面板；没有配置过节点时，在「订阅与代理」添加自己的来源。
@@ -73,7 +76,7 @@
 
 Windows CMD 对应 `ccodex-sleep-state.exe setup`。退出用 `Ctrl+C`，等待配置恢复完成。升级前停止旧程序，替换程序和文档，保留自己的配置与数据目录。
 
-所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r20-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
+所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r21-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
 
 [Windows 教程](docs/windows.md) · [macOS 教程](docs/macos.md) · [面板教程](docs/web-panel.md) · [代理与订阅](docs/proxies.md)
 

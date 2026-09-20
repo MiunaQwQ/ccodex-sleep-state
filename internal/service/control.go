@@ -232,11 +232,27 @@ func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = 200
 		}
-		if r.Context().Err() != nil {
+		if outcome.CompletionForwarded && (aborted == nil || aborted == http.ErrAbortHandler) {
+			outcome.Result = "completed"
+			if r.Context().Err() != nil || aborted != nil || observed.writeFailed {
+				outcome.TerminationReason = "closed_after_complete"
+			}
+		} else if outcome.Result == "failed" {
+			// A known upstream failure is not erased by a client closing its
+			// connection after reading the failure event or HTTP error.
+		} else if r.Context().Err() != nil {
 			outcome.Result = "cancelled"
+			outcome.TerminationReason = "client_disconnected"
+			if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+				outcome.TerminationReason = "request_timeout"
+			}
+			if c.ctx != nil && c.ctx.Err() != nil {
+				outcome.TerminationReason = "service_stopping"
+			}
 		} else if observed.writeFailed || aborted != nil {
 			outcome.Result = "failed"
 			outcome.ErrorCode = "response_interrupted"
+			outcome.TerminationReason = "downstream_write_failed"
 		}
 		c.history.finish(id, requestEvent{Kind: requestKind(r.URL.Path), Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC(), RequestOutcome: *outcome})
 		if aborted != nil {

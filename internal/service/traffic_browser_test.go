@@ -23,8 +23,8 @@ import (
 )
 
 // Synthetic browser fixture: only loopback servers and test credentials.
-func TestBrowserR20Fixture(t *testing.T) {
-	if os.Getenv("SLEEPSTATE_R20_UI") != "1" {
+func TestBrowserTrafficFixture(t *testing.T) {
+	if os.Getenv("SLEEPSTATE_TRAFFIC_UI") != "1" {
 		t.Skip("opt-in browser fixture")
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +58,7 @@ func TestBrowserR20Fixture(t *testing.T) {
 	}
 	c.backup = backup
 	c.engine.SetStateBackup(backup)
-	auth := "Bearer r20-synthetic-browser-account"
+	auth := "Bearer traffic-synthetic-browser-account"
 	credential := sha256.Sum256([]byte(auth + "\x00"))
 	now := time.Now().Truncate(time.Second)
 	for i, model := range settings.SupportedModels() {
@@ -85,7 +85,15 @@ func TestBrowserR20Fixture(t *testing.T) {
 			t.Fatal(w.Code)
 		}
 	}
-	ticket := &browserTicket{value: "r20-synthetic-launch", expires: time.Now().Add(15 * time.Minute)}
+	// Finished records include the r21 completion/close diagnostic.
+	c.history.mu.Lock()
+	for _, group := range c.history.groups {
+		for j := range group.Recent {
+			group.Recent[j].TerminationReason = "closed_after_complete"
+		}
+	}
+	c.history.mu.Unlock()
+	ticket := &browserTicket{value: "traffic-synthetic-launch", expires: time.Now().Add(15 * time.Minute)}
 	handler := controlHandler(c.config.Listen, panelTestToken, c, ticket)
 	listener, err := net.Listen("tcp", c.config.Listen)
 	if err != nil {
@@ -106,11 +114,27 @@ func TestBrowserR20Fixture(t *testing.T) {
 			w.WriteHeader(204)
 			return
 		}
+		if r.Method == http.MethodPost && r.URL.Path == "/__age" {
+			c.history.mu.Lock()
+			for _, group := range c.history.groups {
+				group.LastAt = time.Now().Add(-11 * time.Minute)
+			}
+			c.history.mu.Unlock()
+			w.WriteHeader(204)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/__request" {
+			req := httptest.NewRequest("POST", "http://127.0.0.1:17849/backend-api/codex/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":"synthetic"}`))
+			req.Header.Set("Authorization", auth)
+			req.Header.Set("session_id", "01a0bcd1-229d-7402-a276-a3be28651674")
+			c.ServeHTTP(w, req)
+			return
+		}
 		handler.ServeHTTP(w, r)
 	})}
 	go server.Serve(listener)
 	defer server.Close()
-	t.Log("R20 UI fixture http://127.0.0.1:17849/admin/#launch=r20-synthetic-launch")
+	t.Log("Traffic UI fixture http://127.0.0.1:17849/admin/#launch=traffic-synthetic-launch")
 	select {
 	case <-done:
 	case <-time.After(15 * time.Minute):

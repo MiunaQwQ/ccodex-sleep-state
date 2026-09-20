@@ -62,7 +62,7 @@ func (w *observedResponse) Write(p []byte) (int, error) {
 		w.WriteHeader(200)
 	}
 	n, err := w.ResponseWriter.Write(p)
-	if err != nil {
+	if err != nil || n != len(p) {
 		w.writeFailed = true
 	}
 	if w.onWrite != nil {
