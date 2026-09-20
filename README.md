@@ -16,7 +16,7 @@
 
 先确认 Codex **不经过本工具时原本就能用**。官方账号先登录；中转先配好自己的 API key。用 CCS / CC Switch 的，先选好这次要用的配置，再退出 Codex，暂时别继续切换。
 
-1. 到 [Releases](https://github.com/gylive/ccodex-sleep-state/releases) 下载并完整解压。普通 Windows 选 `windows-amd64`，Windows ARM 选 `windows-arm64`；Apple 芯片 Mac 选 `darwin-arm64`，Intel Mac 选 `darwin-amd64`。
+1. 到 [Releases](https://github.com/NanSsye/ccodex-sleep-state-r14/releases) 下载并完整解压。普通 Windows 选 `windows-amd64`，Windows ARM 选 `windows-arm64`；Apple 芯片 Mac 选 `darwin-arm64`，Intel Mac 选 `darwin-amd64`。
 2. **Windows 双击 `start.cmd`，macOS 双击 `start.command`。** 浏览器会自动打开并进入本地面板，不需要先复制口令。
 3. 程序会自动备份并接入，打开面板。看到已接管后，**重启 Codex，新建会话**，发一条短消息；不用再点一次接入。旧会话不会被热切换。
 

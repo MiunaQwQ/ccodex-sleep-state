@@ -61,3 +61,7 @@ CI 在 Windows、macOS 和 Linux 上跑测试与 `go vet`。发布工作流额�
 维护者提交带 `v` 前缀的版本标签会触发发布。不要从带私有配置的工作树手工 `zip` 整个目录。发布前应先看完 CI，核对 LICENSE、变更说明、问题验收清单和敏感信息扫描结果。Windows 包将 `scripts/start.cmd` 复制到 exe 同目录；macOS 包同样附上可执行 `scripts/start.command`。测试完实际发布包，不能只测试工作树二进制。
 
 仓库只保留维护所需的源文件、测试和文档；构建缓存、运行目录、日志、私有配置、个人环境快照都不属于版本历史。
+
+## 干净发布包
+
+运行 `VERSION=state-pool-20260920-r16 bash scripts/build-release.sh` 构建 macOS Apple Silicon / Intel 与 Windows x64 / ARM64。构建只读取当前提交的临时源码副本，程序包只包含二进制、启动脚本、教程、更新记录、许可证和 `SOURCE_COMMIT`。工作区未跟踪或忽略的节点、订阅、配置、口令、state、日志及运行目录不会参与打包。源码包另附锁定依赖，`SHA256SUMS` 用于验证下载。首次启动由使用者在自己电脑上生成配置并添加来源。
