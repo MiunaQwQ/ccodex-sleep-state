@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gylive/ccodex-sleep-state/internal/codexconfig"
@@ -25,6 +26,7 @@ import (
 // control owns a whole route generation. Reconfiguration never mutates routes
 // under an active request, and never discards an account's upstream rejection.
 type control struct {
+	activeRequests        atomic.Int64
 	collection            *gateway.CollectionBudget
 	pool                  *routepool.Store
 	backup                *turnstate.BackupStore
@@ -78,7 +80,7 @@ func (c *control) start(routes []proxyroute.Route) {
 	}
 	selected := make([]proxyroute.Route, 0, len(routes))
 	for _, route := range routes {
-		if routeSelected(c.config, route.ID) {
+		if routeCandidateSelected(c.config, route.ID) {
 			selected = append(selected, route)
 		} else {
 			route.Close()
@@ -220,16 +222,27 @@ func (c *control) checkManaged() error {
 func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	observed := &observedResponse{ResponseWriter: w}
 	started := time.Now()
+	outcome := &gateway.RequestOutcome{}
+	r = gateway.WithOutcome(r, outcome)
 	defer func() {
 		status := observed.status
 		if status == 0 {
 			status = 200
 		}
-		c.history.record(requestEvent{Kind: requestKind(r.URL.Path), Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC()})
+		kind := requestKind(r.URL.Path)
+		if outcome.Kind == "compact" {
+			kind = "远程压缩"
+		}
+		c.history.record(requestEvent{Kind: kind, Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC(), RequestOutcome: *outcome})
 	}()
 	w = observed
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	locked := true
+	defer func() {
+		if locked {
+			c.mu.RUnlock()
+		}
+	}()
 	if c.managed {
 		if err := c.checkManaged(); err != nil {
 			reply(w, 409, map[string]string{"error": "codex_config_changed", "message": "Codex 配置已被 CCS 或其他程序修改。请打开管理面板，点击「检查与修复配置」；确认当前选择后重新接管并重启 Codex。不会覆盖你的改动。"})
@@ -258,7 +271,12 @@ func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	c.engine.ServeHTTP(w, r)
+	engine := c.engine
+	c.activeRequests.Add(1)
+	c.mu.RUnlock()
+	locked = false
+	defer c.activeRequests.Add(-1)
+	engine.ServeHTTP(w, r)
 }
 func (c *control) status() map[string]any {
 	c.mu.RLock()

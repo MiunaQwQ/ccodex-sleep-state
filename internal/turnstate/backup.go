@@ -70,7 +70,7 @@ func (s *BackupStore) Load(key string) (Persisted, bool) {
 }
 
 func (s *BackupStore) Save(key string, value Persisted) error {
-	if key == "" || value.Active == nil && len(value.Standby) == 0 {
+	if key == "" || value.Active == nil && len(value.Standby) == 0 && len(value.Parked) == 0 {
 		return s.Delete(key)
 	}
 	s.mu.Lock()

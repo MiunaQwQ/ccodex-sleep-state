@@ -12,6 +12,7 @@ func (e *Engine) SetCollectionBudget(b *CollectionBudget) {
 }
 
 func (e *Engine) cards(s *session, now time.Time) []turnstate.Card {
+	e.syncRoutes(s, now)
 	return s.state.Cards(now, func(i int) (string, string) {
 		if i < 0 || i >= len(e.routes) {
 			return "", ""
@@ -22,75 +23,99 @@ func (e *Engine) cards(s *session, now time.Time) []turnstate.Card {
 }
 
 func (e *Engine) standbyTarget() int {
-	if !e.config.PoolEnabled {
+	if !e.settings().PoolEnabled {
 		return 0
 	}
-	return e.config.Collection.StandbyTarget
+	return e.settings().Collection.StandbyTarget
 }
 
-// The first reserve is immediate. Additional/replacement reserves are spaced
-// by acquisition time. At capacity only the oldest reserve is replaced.
+// Fill only vacancies. A full pool never harvests replacement cards early.
 func (e *Engine) collectionAt(s *session, now time.Time) (time.Time, string) {
 	cards := e.cards(s, now)
-	if len(cards) == 0 {
+	active := false
+	usable := cards[:0]
+	for _, card := range cards {
+		if card.Role != "parked" {
+			usable = append(usable, card)
+			active = active || card.Role == "active"
+		}
+	}
+	cards = usable
+	if !active {
 		return now, "missing_active"
 	}
 	target := e.standbyTarget()
-	if target == 0 {
-		if !e.onDemand.Load() {
-			return cards[0].ExpiresAt.Add(-time.Duration(e.config.RefreshSeconds) * time.Second), "refresh_active"
-		}
+	if len(cards) >= target+1 {
 		return time.Time{}, "pool_ready"
 	}
 	if len(cards) == 1 {
 		return now, "missing_standby"
 	}
-	var latest time.Time
-	oldest := cards[1].ExpiresAt
-	for _, card := range cards[1:] {
-		acquired := card.AcquiredAt
-		if acquired.IsZero() {
-			acquired = card.IssuedAt
-		}
-		if acquired.After(latest) {
-			latest = acquired
-		}
-		if card.ExpiresAt.Before(oldest) {
-			oldest = card.ExpiresAt
-		}
+	latest := cards[len(cards)-1].AcquiredAt
+	if latest.IsZero() {
+		latest = cards[len(cards)-1].IssuedAt
 	}
-	at := latest.Add(time.Duration(e.config.Collection.StandbySpacingSeconds) * time.Second)
-	if len(cards)-1 >= target {
-		refresh := oldest.Add(-time.Duration(e.config.RefreshSeconds) * time.Second)
-		if refresh.After(at) {
-			at = refresh
-		}
-		return at, "standby_refresh"
-	}
-	return at, "standby_spacing"
+	return latest.Add(time.Duration(e.settings().Collection.StandbySpacingSeconds) * time.Second), "standby_spacing"
 }
 
-// Caller holds s.mu. Backoff and budgets are independent of success cooldown;
-// rejecting a state can break the latter without resetting either budget.
+// No usable active state includes natural expiration and invalidation without
+// a standby to promote. This is a priority hint, not a cooldown bypass.
+func (e *Engine) seekingActive(s *session, now time.Time) bool {
+	return e.settings().Collection.Cadence == "round" && !s.state.Status(now).Usable
+}
+
+// Caller holds s.mu. Compute one effective gate for scheduling, manual retry,
+// HTTP Retry-After and the panel. An explicit manual random attempt may skip
+// local pacing without resetting persisted history or upstream restrictions.
+func (e *Engine) probeSchedule(s *session, now time.Time, manualRandom ...bool) CollectionStatus {
+	urgent := len(manualRandom) > 0 && manualRandom[0]
+	policy := e.settings().Collection
+	if urgent {
+		policy.Cadence = "round"
+	}
+	status := e.collection.Status(s.backupKey, now, policy, urgent)
+	if !urgent && s.nextProbe.After(now) && s.nextProbe.After(status.NextAt) {
+		status.NextAt, status.Reason = s.nextProbe, "success_cooldown"
+	}
+	if s.upstreamPause.After(now) && s.upstreamPause.After(status.NextAt) {
+		status.NextAt, status.Reason = s.upstreamPause, "upstream_pause"
+	}
+	status.WaitSeconds = 0
+	if status.NextAt.After(now) {
+		status.WaitSeconds = int(status.NextAt.Sub(now).Seconds()) + 1
+	}
+	return status
+}
+
+// Caller holds s.mu. Automatic collection always respects local pacing.
+// Only an explicit one-shot manual action may skip it; hard gates still apply.
 func (e *Engine) collectionStatus(s *session, now time.Time) CollectionStatus {
-	status := e.collection.Status(s.backupKey, now, e.config.Collection)
+	status := e.probeSchedule(s, now)
 	at, reason := e.collectionAt(s, now)
 	if at.IsZero() {
 		status.Reason = "pool_ready"
 		status.NextAt = time.Time{}
 	} else {
-		if s.nextProbe.After(at) {
-			at, reason = s.nextProbe, "success_cooldown"
-		}
 		if !status.NextAt.IsZero() && !status.NextAt.Before(at) {
 			at, reason = status.NextAt, status.Reason
 		}
 		status.NextAt, status.Reason = at, reason
 	}
-	status.Idle = now.Sub(s.lastUsed) >= time.Duration(e.config.Collection.IdleSeconds)*time.Second
-	if status.Idle {
+	status.Idle = e.collectionIdleLocked(s, now)
+	if status.Idle && status.Reason != "pool_ready" {
 		status.Reason = "idle"
 	}
-	status.WaitSeconds = max(0, int(status.NextAt.Sub(now).Seconds())+1)
+	status.WaitSeconds = 0
+	if status.NextAt.After(now) {
+		status.WaitSeconds = int(status.NextAt.Sub(now).Seconds()) + 1
+	}
+	if s.probing != nil {
+		status.Reason, status.WaitSeconds = "collecting", 0
+	}
 	return status
+}
+
+// Caller holds s.mu. Metadata requests and probes cannot refresh AI activity.
+func (e *Engine) collectionIdleLocked(s *session, now time.Time) bool {
+	return s.aiBusy == 0 && now.Sub(s.lastAI) >= time.Duration(e.settings().Collection.IdleSeconds)*time.Second
 }

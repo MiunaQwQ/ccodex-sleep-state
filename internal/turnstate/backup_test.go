@@ -26,8 +26,8 @@ func TestStoreKeepsMultipleStandbyAndPromotesOnInvalidation(t *testing.T) {
 		t.Fatal("active was not invalidated")
 	}
 	next, ok := s.Acquire(now)
-	if !ok || next.Token.Value != c.Value {
-		t.Fatal("newest standby was not promoted")
+	if !ok || next.Token.Value != b.Value {
+		t.Fatal("oldest acquired standby was not promoted")
 	}
 }
 

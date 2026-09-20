@@ -27,6 +27,7 @@ type PersistedSnapshot struct {
 type Persisted struct {
 	Active  *PersistedSnapshot  `json:"active,omitempty"`
 	Standby []PersistedSnapshot `json:"standby,omitempty"`
+	Parked  []PersistedSnapshot `json:"parked,omitempty"`
 	SavedAt time.Time           `json:"saved_at"`
 }
 
@@ -40,6 +41,9 @@ type Store struct {
 	policy        Policy
 	active, ready Snapshot
 	standby       []Snapshot
+	parked        []Snapshot
+	suspended     map[int]bool
+	events        []Event
 	version       uint64
 	strikes       int
 	candidates    uint64
@@ -77,11 +81,12 @@ func (s *Store) promote(now time.Time) {
 		s.promote(now)
 		return
 	}
-	shouldPromote := !activeOK || s.strikes >= 2 || (!s.holdActive && now.Add(s.policy.Refresh).After(a.Token.Issued.Add(s.policy.TTL)) && candidate.Token.Issued.After(a.Token.Issued))
+	shouldPromote := !activeOK || s.strikes >= 2
 	if shouldPromote {
 		s.version++
 		candidate.Version = s.version
 		s.active = candidate
+		s.record("promoted", candidate, now)
 		s.standby = s.standby[1:]
 		s.strikes = 0
 	}
@@ -94,6 +99,7 @@ func (s *Store) promote(now time.Time) {
 
 func (s *Store) prune(now time.Time) {
 	if s.active.Token.Value != "" && !s.policy.Accept(s.active.Token, now) {
+		s.record("expired", s.active, now)
 		s.active = Snapshot{}
 	}
 	kept := s.standby[:0]
@@ -116,7 +122,8 @@ func (s *Store) Offer(t Token, route int, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.candidates++
-	if !s.policy.Accept(t, now) {
+	s.promote(now)
+	if !s.policy.Accept(t, now) || s.suspended[route] {
 		return false
 	}
 	if t.Fingerprint == s.active.Token.Fingerprint {
@@ -132,20 +139,46 @@ func (s *Store) Offer(t Token, route int, now time.Time) bool {
 		s.version++
 		candidate.Version = s.version
 		s.active = candidate
+		s.record("acquired_main", candidate, now)
 		s.strikes = 0
 		s.promote(now)
 		return true
 	}
+	if len(s.standby) >= s.standbyLimit {
+		return false
+	}
 	s.standby = append(s.standby, candidate)
+	s.record("acquired_standby", candidate, now)
 	s.sortStandby()
 	s.promote(now)
 	return true
 }
 
+// Bootstrap fills an empty usable pool from a completed ordinary response.
+// It never replaces a concurrently acquired active state or adds a standby.
+func (s *Store) Bootstrap(t Token, route int, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.promote(now)
+	if s.policy.Accept(s.active.Token, now) || !s.policy.Accept(t, now) || s.suspended[route] {
+		return false
+	}
+	s.candidates++
+	s.version++
+	s.active = Snapshot{Token: t, Route: route, AcquiredAt: now, Version: s.version}
+	s.record("acquired_main", s.active, now)
+	s.strikes = 0
+	return true
+}
+
 func (s *Store) sortStandby() {
-	sort.SliceStable(s.standby, func(i, j int) bool { return s.standby[i].Token.Issued.After(s.standby[j].Token.Issued) })
-	if len(s.standby) > s.standbyLimit {
-		s.standby = s.standby[:s.standbyLimit]
+	sort.SliceStable(s.standby, func(i, j int) bool { return acquired(s.standby[i]).Before(acquired(s.standby[j])) })
+	limit := s.standbyLimit
+	if s.active.Token.Value == "" {
+		limit++
+	}
+	if len(s.standby) > limit {
+		s.standby = s.standby[:limit]
 	}
 }
 
@@ -158,7 +191,7 @@ func (s *Store) Observe(value string, used Snapshot, now time.Time) bool {
 	s.candidates++
 	t, err := Parse(value)
 	suspect := err != nil || !s.policy.Accept(t, now)
-	if used.Version == s.active.Version && used.Token.Fingerprint == s.active.Token.Fingerprint {
+	if used.Token.Value != "" && used.Version == s.active.Version && used.Token.Fingerprint == s.active.Token.Fingerprint {
 		if suspect {
 			s.strikes++
 		} else {
@@ -211,6 +244,11 @@ func (s *Store) Export(now time.Time, routeID func(int) string) Persisted {
 			result.Standby = append(result.Standby, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued, AcquiredAt: candidate.AcquiredAt})
 		}
 	}
+	for _, candidate := range s.parked {
+		if s.policy.Accept(candidate.Token, now) {
+			result.Parked = append(result.Parked, PersistedSnapshot{Token: candidate.Token.Value, RouteID: routeID(candidate.Route), Issued: candidate.Token.Issued, AcquiredAt: candidate.AcquiredAt})
+		}
+	}
 	return result
 }
 
@@ -219,7 +257,7 @@ func (s *Store) Export(now time.Time, routeID func(int) string) Persisted {
 func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int, bool)) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.active, s.ready, s.standby = Snapshot{}, Snapshot{}, nil
+	s.active, s.ready, s.standby, s.parked = Snapshot{}, Snapshot{}, nil, nil
 	add := func(raw PersistedSnapshot) (Snapshot, bool) {
 		route, ok := routeIndex(raw.RouteID)
 		if !ok {
@@ -241,6 +279,11 @@ func (s *Store) Restore(p Persisted, now time.Time, routeIndex func(string) (int
 	for _, raw := range p.Standby {
 		if candidate, ok := add(raw); ok && candidate.Token.Fingerprint != s.active.Token.Fingerprint {
 			s.standby = append(s.standby, candidate)
+		}
+	}
+	for _, raw := range p.Parked {
+		if candidate, ok := add(raw); ok {
+			s.parked = append(s.parked, candidate)
 		}
 	}
 	s.sortStandby()
@@ -269,14 +312,31 @@ func (s *Store) RejectAndPromote(used Snapshot, now time.Time) bool {
 
 func (s *Store) HoldActive(hold bool) { s.mu.Lock(); defer s.mu.Unlock(); s.holdActive = hold }
 
+func (s *Store) DropRoute(route int, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active.Route == route {
+		s.active = Snapshot{}
+	}
+	kept := s.standby[:0]
+	for _, card := range s.standby {
+		if card.Route != route {
+			kept = append(kept, card)
+		}
+	}
+	s.standby = kept
+	s.promote(now)
+}
+
 // Invalidate only the snapshot actually used by a failing request. Late
 // responses must not invalidate a newer active state.
 func (s *Store) Invalidate(used Snapshot, now time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if used.Version != s.active.Version || used.Token.Fingerprint != s.active.Token.Fingerprint {
+	if used.Token.Value == "" || used.Version != s.active.Version || used.Token.Fingerprint != s.active.Token.Fingerprint {
 		return false
 	}
+	s.record("invalidated", s.active, now)
 	s.active = Snapshot{}
 	s.strikes = 0
 	s.promote(now)

@@ -1,6 +1,6 @@
 "use strict";
 let advancedDirty=false, advancedRevision=0, policyDirty=false, policyRevision=0, lifecycleRows=[];
-const advancedFields={request_limit_mib:"request-limit",zstd_window_mib:"window-limit",compact_limit_mib:"compact-limit"};
+const advancedFields={request_limit_mib:"request-limit",zstd_window_mib:"window-limit"};
 let nextPage="configuration",nextFocus="";
 function renderUpgrade(s){
  let title="已接上，可以开始使用",help="重启 Codex、新建对话，发一句话即可。无需反复接入。";nextPage="overview";nextFocus="";
@@ -38,25 +38,26 @@ $("save-state-policy").addEventListener("click",()=>action(async()=>{
 $("advanced-form").addEventListener("input",()=>{advancedDirty=true;advancedRevision++;});
 $("pool-preset").addEventListener("click",()=>{advancedDirty=true;advancedRevision++;$("egress-mode").value="state";$("pool-enabled").checked=true;notice("已填入；保存后才生效。携带 state 的请求将固定在该 state 的来源节点。");});
 $("advanced-form").addEventListener("submit",event=>{event.preventDefault();action(async()=>{
- if(!confirm("保存会清空 state 缓存，但保留节点已用/失败记录。更大的请求限制会占更多内存；跨出口使用 state 可能被上游拒绝。继续？"))return;
+ if(!confirm("保存连接设置会保留符合规则的 state 备份和节点状态。已有请求不会中断；更大的请求上限占用更多内存。继续？"))return;
  const body=Object.fromEntries(Object.entries(advancedFields).map(([key,id])=>[key,Number($(id).value)]));
  Object.assign(body,{egress_mode:$("egress-mode").value,egress_route:$("egress-route").value,pool_enabled:$("pool-enabled").checked,external_proxy_only:$("external-only").checked,node_network_mode:$("node-network-mode").value,node_interface:$("node-interface").value.trim()});
  const revision=advancedRevision;const r=await api("advanced",body);if(revision===advancedRevision)advancedDirty=false;$("advanced-result").textContent=r.message;await refresh();
 });});
 async function loadLifecyclePool(){
- const data=await api("pool",{});lifecycleRows=data.routes||[];
+ const data=await api("pool/status");lifecycleRows=data.routes||[];
  const selected=$("egress-route").value;$("egress-route").replaceChildren(new Option("请选择节点",""));
  for(const row of lifecycleRows)$("egress-route").add(new Option(`${row.label} · ${row.id}`,row.id));$("egress-route").value=selected;
  $("pool-summary").textContent=`共 ${lifecycleRows.length} 个节点；代理池自动轮换${data.enabled?"已开启":"未开启"}。不会把节点数量当成独立公网 IP 数量。`;
  renderPool();
 }
-const poolReasons={manual:"手动调整",accepted:"已取得符合规则的值",probe_started:"已开始探测",request_started:"已派发请求",request_dispatched:"已使用",request_failed:"请求未成功",shape_mismatch:"返回值不符合规则",state_time_rejected:"已过期或时间异常",missing_state_header:"未返回 state",invalid_state_envelope:"state 格式无法识别",model_capacity:"上游模型繁忙",upstream_rate_limited:"上游要求暂停",response_failed:"上游报告失败",incomplete_response:"回复未完整结束",network_failed:"连接失败或超时",upstream_rejected:"上游拒绝请求"};
+const poolReasons={manual:"手动调整",accepted:"已取得符合规则的值",probe_started:"已开始探测",request_started:"已派发请求",request_dispatched:"已使用",request_failed:"请求未成功",shape_mismatch:"返回值不符合规则",state_time_rejected:"已过期或时间异常",missing_state_header:"未返回 state",invalid_state_envelope:"state 格式无法识别",model_capacity:"上游模型繁忙",upstream_rate_limited:"上游要求暂停",response_failed:"上游报告失败",incomplete_response:"回复未完整结束",network_failed:"连接失败或超时 · 不自动恢复",upstream_rejected:"上游拒绝请求"};
 function renderPool(){
+ const checked = new Set([...document.querySelectorAll('[data-pool-id]:checked')].map(box=>box.dataset.poolId));
  $("pool-list").replaceChildren();const rows=lifecycleRows.filter(r=>r.state===$("pool-filter").value);
  for(const row of rows){
-  const box=textNode("div","","card");const label=textNode("label","");const checkbox=document.createElement("input");checkbox.type="checkbox";checkbox.dataset.poolId=row.id;
+  const box=textNode("div","","card");const label=textNode("label","");const checkbox=document.createElement("input");checkbox.type="checkbox";checkbox.dataset.poolId=row.id;checkbox.checked=checked.has(row.id);
   label.append(checkbox,document.createTextNode(`${row.label||row.id} · ${row.protocol}`));box.append(label,textNode("p",`${row.id} · 尝试 ${row.attempts} 次 · ${poolReasons[row.reason]||(row.reason?"未成功，请查看会话提示":"尚未使用")}`,"hint"));
-  const retry=textNode("button","只试这个节点","secondary");retry.disabled=row.state==="disabled";retry.dataset.locked=String(retry.disabled);
+  const retry=textNode("button","只试这个节点","secondary");retry.disabled=row.state==="disabled"||row.state==="failed";retry.dataset.locked=String(retry.disabled);
   retry.addEventListener("click",()=>action(async()=>{
    const id=$("pool-session").value;if(!id){notice("先在 Codex 发一条消息并刷新，然后选择会话。不会自动读取账号文件。");return;}
    if(!confirm("使用所选会话的凭据，在此节点发送一次短模型探测，可能消耗额度。成功后有采集间隔，失败遵守退避间隔与总预算；仍遵守上游暂停。继续？"))return;
@@ -78,8 +79,19 @@ $("subscription-txt").addEventListener("change",async()=>{
  const file=$("subscription-txt").files[0];if(!file)return;if(file.size>65536){notice("TXT 不能超过 64 KiB。");return;}
  try{$("subscription-lines").value=await file.text();}catch{notice("文件读取失败，请使用 UTF-8 TXT。");}
 });
-function importBody(){return {mode:"subscription-list",value:$("subscription-lines").value,append:$("subscription-append").checked,enable_pool:$("subscription-enable-pool").checked};}
-$("test-pool-import").addEventListener("click",()=>action(async()=>{const r=await api("sources/test",importBody());$("pool-import-result").textContent=`${r.message} 合并后 ${r.routes.length} 个节点。`;}));
+function normalizeSubscriptionLines(value){
+ return value.split(/\r?\n/).map(raw=>{
+  const line=raw.trim();if(!/^sub:\/\//i.test(line))return line;
+  try {
+   const encoded=line.slice(6).split("#")[0].replace(/-/g,"+").replace(/_/g,"/");
+   const url=new TextDecoder("utf-8",{fatal:true}).decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))).trim();
+   if(!/^https?:\/\//i.test(url))throw new Error();
+   return url;
+  }catch {throw new Error("sub:// 链接无法识别，请复制完整的订阅链接。");}
+ }).join("\n");
+}
+function importBody(){$("subscription-lines").value=normalizeSubscriptionLines($("subscription-lines").value);return {mode:"auto",value:$("subscription-lines").value,exclude_keywords:$("subscription-exclude").value.split(",").map(x=>x.trim()).filter(Boolean),append:$("subscription-append").checked,enable_pool:$("subscription-enable-pool").checked};}
+$("test-pool-import").addEventListener("click",()=>action(async()=>{const r=await api("sources/test",importBody());$("pool-import-result").textContent=`${r.message} 合并后 ${r.routes.length} 个节点。新增 ${r.diff?.added||0} · 保留 ${r.diff?.retained||0} · 移除 ${r.diff?.removed||0}。\n${r.routes.map(n=>`${n.label || n.id} · ${n.protocol}`).join("\n")}`;}));
 $("pool-import-form").addEventListener("submit",event=>{event.preventDefault();action(async()=>{
  if(!confirm(`${$("subscription-append").checked?"追加":"替换"}订阅并应用？旧配置会备份，现有合格 state 备份会保留。仅使用你有权使用的来源。`))return;
  const r=await api("sources/apply",importBody());$("pool-import-result").textContent=r.message;$("subscription-lines").value="";$("subscription-txt").value="";await refresh();await loadPool();

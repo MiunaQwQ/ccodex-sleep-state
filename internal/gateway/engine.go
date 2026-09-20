@@ -37,6 +37,9 @@ type credentialLimit struct {
 }
 
 type session struct {
+	persistMu           sync.Mutex
+	lastStateCheck      ResponseStateCheck
+	lastProbeResult     *NodeObservation
 	id                  string
 	model               string
 	policy              accountPolicy
@@ -49,6 +52,8 @@ type session struct {
 	state               *turnstate.Store
 	lastUsed, nextProbe time.Time
 	busy                int
+	aiBusy              int
+	lastAI              time.Time
 	activated           bool
 	cursor              int
 	probing             chan struct{}
@@ -56,14 +61,23 @@ type session struct {
 	upstreamPause       time.Time
 	nodes               map[string]NodeObservation
 	backupKey           string
+	nodePauses          map[int]time.Time
+	retainedRoute       int
+	retainedLast        bool
+	fallbackRoute       int
 }
 
 type Engine struct {
+	bodyWaiting    atomic.Int64
+	featureWaiting atomic.Int64
+	foreground     atomic.Int64
 	collection     *CollectionBudget
 	onDemand       atomic.Bool
 	pool           *routepool.Store
 	backup         *turnstate.BackupStore
 	bodySlots      chan struct{}
+	featureSlots   chan struct{}
+	liveConfig     atomic.Pointer[settings.Config]
 	requests       atomic.Uint64
 	lastRequest    atomic.Int64
 	injectionEpoch atomic.Uint64
@@ -87,6 +101,7 @@ func New(c settings.Config, routes []proxyroute.Route, logger *slog.Logger, pool
 		e.pool = pools[0]
 	}
 	e.bodySlots = make(chan struct{}, 4)
+	e.featureSlots = make(chan struct{}, 2)
 	e.onDemand.Store(c.StateRefreshMode == "on_demand")
 	e.disabled.Store(c.InjectionDisabled || c.IsRelay())
 	return e
@@ -97,7 +112,7 @@ func New(c settings.Config, routes []proxyroute.Route, logger *slog.Logger, pool
 // original constructor contract.
 func (e *Engine) SetStateBackup(store *turnstate.BackupStore) { e.backup = store }
 func (e *Engine) borrow(h http.Header, models ...string) (*session, error) {
-	model := e.config.SelectedModel()
+	model := e.settings().SelectedModel()
 	if len(models) > 0 {
 		model = models[0]
 	}
@@ -159,10 +174,11 @@ func (e *Engine) borrow(h http.Header, models ...string) (*session, error) {
 			e.limits[credentialKey] = limit
 		}
 		policy := policyFor(e.config, h)
-		s = &session{id: rand.Text(), model: model, policy: policy, limit: limit, headers: safe, backupKey: stateBackupKey(key, e.config.Upstream), state: turnstate.New(turnstate.Policy{Blocks: policy.Blocks, TTL: time.Duration(e.config.TTLSeconds) * time.Second, Refresh: time.Duration(e.config.RefreshSeconds) * time.Second})}
+		s = &session{id: rand.Text(), model: model, policy: policy, limit: limit, headers: safe, backupKey: stateBackupKey(key, e.settings().Upstream), state: turnstate.New(turnstate.Policy{Blocks: policy.Blocks, TTL: time.Duration(e.settings().TTLSeconds) * time.Second, Refresh: time.Duration(e.settings().RefreshSeconds) * time.Second})}
 		s.state.HoldActive(e.onDemand.Load())
-		if e.config.PoolEnabled {
-			s.state.SetStandbyLimit(e.config.Collection.StandbyTarget)
+		s.lastAI = now
+		if e.settings().PoolEnabled {
+			s.state.SetStandbyLimit(e.settings().Collection.StandbyTarget)
 		}
 		e.restoreState(s)
 		e.sessions[key] = s
@@ -190,16 +206,13 @@ func (e *Engine) restoreState(s *session) {
 	}
 	byID := make(map[string]int, len(e.routes))
 	for i, route := range e.routes {
-		entry := e.pool.Get(route.ID)
-		if entry.State == "disabled" || (e.config.PoolEnabled && e.config.PinnedRoute == "" && entry.State == "failed") {
-			continue
-		}
 		byID[route.ID] = i
 	}
 	count := s.state.Restore(persisted, time.Now(), func(id string) (int, bool) {
 		index, ok := byID[id]
 		return index, ok
 	})
+	e.syncRoutes(s, time.Now())
 	if count > 0 {
 		s.mu.Lock()
 		s.diagnostic = "restored_backup"
@@ -209,6 +222,8 @@ func (e *Engine) restoreState(s *session) {
 }
 
 func (e *Engine) persistState(s *session) {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	if e.backup == nil || s.backupKey == "" {
 		return
 	}
@@ -241,6 +256,9 @@ func (e *Engine) Run(ctx context.Context) {
 		}
 		work := e.backgroundWork(time.Now())
 		for _, s := range work {
+			s.mu.Lock()
+			lastProbe := s.lastProbe
+			s.mu.Unlock()
 			if ctx.Err() == nil && e.needsCollection(s, time.Now()) && e.hasProbeCandidate() {
 				e.refresh(ctx, s, false)
 			}
@@ -248,7 +266,13 @@ func (e *Engine) Run(ctx context.Context) {
 			// Wake immediately only when another probe is due. Failed attempts are
 			// paced by the shared persistent collection budget.
 			s.mu.Lock()
-			due := s.probing == nil && !time.Now().Before(s.nextProbe) && !time.Now().Before(s.upstreamPause)
+			// Foreground generations and background collection are independent
+			// requests. A completed probe wakes the collector even while Codex is
+			// streaming a reply; the shared probe slot, account guard and budget
+			// still bound the work.
+			// Only completed work can immediately wake another batch. If all
+			// remaining nodes are paused, wait for the ticker instead of spinning.
+			due := s.probing == nil && s.lastProbe.After(lastProbe) && e.probeSchedule(s, time.Now()).WaitSeconds == 0
 			s.mu.Unlock()
 			status, _ := s.rejection()
 			if due && status == 0 && e.needsCollection(s, time.Now()) && e.hasProbeCandidate() {
@@ -280,12 +304,13 @@ func (e *Engine) hasProbeCandidate() bool {
 	if e.pool.Err() != nil {
 		return false
 	}
+	pinned := e.effectivePinnedRoute()
 	for _, route := range e.routes {
-		if e.config.PinnedRoute != "" && e.config.PinnedRoute != route.ID {
+		if pinned != "" && pinned != route.ID {
 			continue
 		}
 		state := e.pool.Get(route.ID).State
-		if state != "disabled" && (e.config.PinnedRoute != "" || !e.config.PoolEnabled || state == "available") {
+		if state != "disabled" && state != "failed" && (pinned != "" || !e.settings().PoolEnabled || state == "available") {
 			return true
 		}
 	}
@@ -312,19 +337,38 @@ func (e *Engine) backgroundWork(now time.Time) []*session {
 		available := s.probing == nil && !s.queued
 		if idle && available && s.busy == 0 {
 			delete(e.sessions, key)
-		} else if now.Sub(s.lastUsed) < time.Duration(e.config.Collection.IdleSeconds)*time.Second && available && s.activated {
+		} else if !e.collectionIdleLocked(s, now) && available && s.activated {
 			s.busy++
 			s.queued = true
 			work = append(work, s)
 		}
 		s.mu.Unlock()
 	}
+	sort.SliceStable(work, func(i, j int) bool {
+		a, b := work[i].state.Status(now), work[j].state.Status(now)
+		if a.Usable != b.Usable {
+			return !a.Usable
+		}
+		nearA := a.Usable && a.Standby == 0 && a.RemainingSeconds <= e.settings().RefreshSeconds
+		nearB := b.Usable && b.Standby == 0 && b.RemainingSeconds <= e.settings().RefreshSeconds
+		if nearA != nearB {
+			return nearA
+		}
+		if a.Standby != b.Standby {
+			return a.Standby < b.Standby
+		}
+		return work[i].id < work[j].id
+	})
 	return work
 }
 
 func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only ...int) {
+	e.refreshOnce(ctx, s, bootstrap, false, only...)
+}
+
+func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualRandom bool, only ...int) {
 	epoch := e.injectionEpoch.Load()
-	if e.disabled.Load() || e.pool.Err() != nil {
+	if e.disabled.Load() || e.pool.Err() != nil || (e.settings().PoolEnabled && e.statePoolReady(s, time.Now())) {
 		return
 	}
 	s.mu.Lock()
@@ -336,15 +380,25 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		}
 		return
 	}
-	if status, _ := s.rejection(); status != 0 || time.Now().Before(s.nextProbe) || time.Now().Before(s.upstreamPause) {
+	if status, _ := s.rejection(); status != 0 || e.probeSchedule(s, time.Now(), manualRandom).WaitSeconds > 0 {
 		s.mu.Unlock()
 		return
 	}
 	done := make(chan struct{})
 	s.probing = done
+	seekingActive := e.seekingActive(s, time.Now())
 	s.mu.Unlock()
+	attempts := 0
+	roundCadence := e.settings().Collection.Cadence == "round"
+	roundCooldown := time.Duration(e.settings().CooldownSeconds) * time.Second
 	defer func() {
+		if roundCadence && attempts > 0 {
+			e.collection.EndRound(s.backupKey, time.Now(), roundCooldown)
+		}
 		s.mu.Lock()
+		if roundCadence && attempts > 0 {
+			s.nextProbe = e.collection.Status(s.backupKey, time.Now(), e.settings().Collection).NextAt
+		}
 		s.probing = nil
 		close(done)
 		s.mu.Unlock()
@@ -355,11 +409,13 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 	case <-ctx.Done():
 		return
 	}
-	limit := min(e.config.MaxProbes, len(e.routes))
+	limit := min(e.settings().MaxProbes, len(e.routes))
+	tried := make(map[int]bool)
+	rotationStarted := false
 	pinned := -1
-	if e.config.PinnedRoute != "" {
+	if pin := e.effectivePinnedRoute(); pin != "" {
 		for i := range e.routes {
-			if e.routes[i].ID == e.config.PinnedRoute {
+			if e.routes[i].ID == pin {
 				pinned = i
 				break
 			}
@@ -373,46 +429,97 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		pinned = only[0]
 		limit = 1
 	}
-	attempts := 0
 	for i := 0; i < len(e.routes) && attempts < limit; i++ {
-		if ctx.Err() != nil || e.disabled.Load() || e.injectionEpoch.Load() != epoch {
+		// Foreground generations do not cancel a probe round. Finish the
+		// already-dispatched probe and continue to the next selected node;
+		// probeSlot, the account guard and the persisted budget remain active.
+		if ctx.Err() != nil || e.disabled.Load() || e.injectionEpoch.Load() != epoch || (e.settings().PoolEnabled && e.statePoolReady(s, time.Now())) {
 			return
 		}
 		s.mu.Lock()
+		if seekingActive && !manualRandom && s.state.Status(time.Now()).Usable {
+			s.mu.Unlock()
+			return
+		}
+		if !bootstrap && len(only) == 0 && e.collectionIdleLocked(s, time.Now()) {
+			s.mu.Unlock()
+			return
+		}
 		if status, _ := s.rejection(); status != 0 {
 			s.mu.Unlock()
 			return
 		}
-		route := s.cursor % len(e.routes)
-		s.cursor++
 		s.mu.Unlock()
+		route := pinned
+		if route < 0 {
+			route = e.nextProbeInRotation(s, tried, !rotationStarted, time.Now())
+			if route < 0 {
+				break
+			}
+		}
 		if pinned >= 0 {
 			route = pinned
 		}
+		s.mu.Lock()
+		paused := time.Now().Before(s.nodePauses[route])
+		s.mu.Unlock()
+		if paused {
+			continue
+		}
+		if tried[route] {
+			return
+		}
 		entry := e.pool.Get(e.routes[route].ID)
-		if e.config.PoolEnabled && len(only) == 0 && e.config.PinnedRoute == "" && entry.State != "available" {
+		if e.settings().PoolEnabled && len(only) == 0 && pinned < 0 && entry.State != "available" {
 			continue
 		}
-		if entry.State == "disabled" {
+		if entry.State == "disabled" || entry.State == "failed" {
 			continue
 		}
-		if until, reason := e.collection.Reserve(s.backupKey, time.Now(), e.config.Collection); !until.IsZero() {
+		seekingActive = seekingActive || e.seekingActive(s, time.Now())
+		policy := e.settings().Collection
+		if manualRandom {
+			policy.Cadence = "round" // Skip local pacing only, never hourly/storage gates.
+		}
+		if until, reason := e.collection.ReserveRound(s.backupKey, time.Now(), policy, manualRandom || (roundCadence && attempts > 0), roundCooldown); !until.IsZero() {
 			s.mu.Lock()
 			s.nextProbe, s.diagnostic = until, reason
 			s.mu.Unlock()
 			return
 		}
-		if e.config.PoolEnabled && len(only) == 0 && e.config.PinnedRoute == "" {
+		if e.settings().PoolEnabled && len(only) == 0 && pinned < 0 {
 			if err := e.pool.ClaimProbe(e.routes[route].ID, len(only) > 0); err != nil {
+				tried[route] = true
 				if e.pool.Err() != nil {
 					return
 				}
 				continue
 			}
 		}
+		if pinned < 0 {
+			if err := e.collection.recordRotationAttempt(s.backupKey, e.routes[route].ID, time.Now()); err != nil {
+				_ = e.pool.FinishProbe(e.routes[route].ID, "available", "rotation_storage_error")
+				return
+			}
+			rotationStarted = true
+		}
 		attempts++
+		tried[route] = true
 		started := time.Now()
+		e.log.Info("probe_started", "route", e.routes[route].ID, "model", s.model,
+			"round_attempt", attempts, "foreground_requests", e.foreground.Load())
 		token, status, retryAfter, err := e.probe(ctx, s.headers, e.routes[route], s.model)
+		if ctx.Err() != nil {
+			_ = e.pool.FinishProbe(e.routes[route].ID, "available", "probe_cancelled")
+			return
+		}
+		if errors.Is(err, errProbeTransport) {
+			e.failRoute(route)
+			if len(only) == 0 && pinned == route {
+				pinned = -1
+				limit = min(e.settings().MaxProbes, len(e.routes))
+			}
+		}
 		accepted := false
 		duplicate := false
 		for _, card := range e.cards(s, time.Now()) {
@@ -422,7 +529,12 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 			}
 		}
 		if err == nil && !duplicate && !e.disabled.Load() && e.injectionEpoch.Load() == epoch {
-			accepted = s.state.Offer(token, route, time.Now())
+			s.mu.Lock()
+			entry := e.pool.Get(e.routes[route].ID)
+			if entry.State != "failed" && entry.State != "disabled" {
+				accepted = s.state.Offer(token, route, time.Now())
+			}
+			s.mu.Unlock()
 			if accepted {
 				e.persistState(s)
 			}
@@ -455,12 +567,17 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		}
 		// Probe failures belong to this model session only. A model that cannot
 		// produce a state must never poison another model's usable state pool.
-		e.collection.Complete(s.backupKey, time.Now(), accepted, e.config.Collection, result, e.routes[route].ID)
-		if e.config.PoolEnabled {
+		e.collection.Complete(s.backupKey, time.Now(), accepted, e.settings().Collection, result, e.routes[route].ID)
+		if e.settings().PoolEnabled {
 			// A probe result is a health observation, not a permanent lease. Keep
-			// the route eligible so one bad response immediately advances to the
-			// next candidate and later rounds can re-check transient failures.
-			if err := e.pool.Change([]string{e.routes[route].ID}, "available", result, false); err != nil {
+			// successful and shape results eligible. A transport timeout is a
+			// dead link for this run: remove it from automatic rotation until the
+			// user explicitly puts it back from the node list.
+			poolState := "available"
+			if result == "network_failed" {
+				poolState = "failed"
+			}
+			if err := e.pool.FinishProbe(e.routes[route].ID, poolState, result); err != nil {
 				return
 			}
 		}
@@ -469,18 +586,24 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		// Only a still-usable successful state earns a cooldown. A concurrent 312
 		// may have invalidated it already and must not be overwritten by this defer.
 		if accepted && e.statePoolReady(s, time.Now()) {
-			s.nextProbe = time.Now().Add(time.Duration(e.config.CooldownSeconds) * time.Second)
+			s.nextProbe = time.Now().Add(time.Duration(e.settings().CooldownSeconds) * time.Second)
 		} else if accepted {
 			s.nextProbe = time.Time{}
 		} else {
-			s.nextProbe = e.collection.Status(s.backupKey, time.Now(), e.config.Collection).NextAt
+			s.nextProbe = e.collection.Status(s.backupKey, time.Now(), e.settings().Collection).NextAt
 		}
 		s.mu.Unlock()
 		e.recordNode(s, route, result, status, token.Blocks, time.Since(started), "probe")
+		if result == "shape_mismatch" && token.Blocks == 11 {
+			e.pauseMismatchedRoute(s, route, token.Blocks, time.Now(), started)
+		} else if !accepted && (result == "network_failed" || status >= 500) {
+			e.advanceUnavailableRoute(s, route, time.Now())
+		}
 		// Shape metadata explains a rejected probe without exposing its token.
 		e.log.Info("probe_finished", "route", e.routes[route].ID, "status", status,
 			"accepted", accepted, "result", result, "state_blocks", token.Blocks,
-			"expected_blocks", s.policy.Blocks, "model", s.model)
+			"expected_blocks", s.policy.Blocks, "model", s.model,
+			"duration_ms", time.Since(started).Milliseconds(), "foreground_requests", e.foreground.Load())
 		// Preserve upstream account limits rather than converting them to a
 		// generic "no state" error or moving on to another egress.
 		if rejectionStatus == http.StatusUnauthorized || rejectionStatus == http.StatusForbidden {
@@ -489,19 +612,16 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 		if rejectionStatus == http.StatusTooManyRequests {
 			return
 		}
-		// A completed error event is an upstream decision, not a reason to gamble
-		// on another exit. Pause separately from success cooldowns.
+		// Capacity and ordinary stream failures skip this candidate. Auth and
+		// quota errors above still stop the round and respect Retry-After.
 		if streamFailure != nil {
-			s.mu.Lock()
-			s.upstreamPause = time.Now().Add(max(30*time.Second, retryAfter))
-			s.mu.Unlock()
-			return
+			continue
 		}
 		if accepted {
-			if (bootstrap && !e.config.PoolEnabled) || !e.needsCollection(s, time.Now()) {
+			if (seekingActive && s.state.Status(time.Now()).Usable) || (bootstrap && !e.settings().PoolEnabled) || !e.needsCollection(s, time.Now()) {
 				return
 			}
-		} else {
+		} else if !roundCadence && result != "network_failed" {
 			return
 		}
 	}
@@ -513,11 +633,11 @@ func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only .
 }
 
 func (e *Engine) probe(parent context.Context, h http.Header, route proxyroute.Route, models ...string) (turnstate.Token, int, time.Duration, error) {
-	model := e.config.SelectedModel()
+	model := e.settings().SelectedModel()
 	if len(models) > 0 {
 		model = models[0]
 	}
-	ctx, cancel := context.WithTimeout(parent, time.Duration(e.config.ProbeSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(parent, time.Duration(e.settings().ProbeSeconds)*time.Second)
 	defer cancel()
 	// Match the Codex Responses envelope used by the source gateway. Do not
 	// force a lower reasoning effort than the upstream default for collection.
@@ -528,7 +648,7 @@ func (e *Engine) probe(parent context.Context, h http.Header, route proxyroute.R
 		"include": []string{"reasoning.encrypted_content"},
 	}
 	encoded, _ := json.Marshal(body)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.config.Upstream, "/")+"/responses", bytes.NewReader(encoded))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.settings().Upstream, "/")+"/responses", bytes.NewReader(encoded))
 	req.Header = h.Clone()
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -554,6 +674,9 @@ func (e *Engine) probe(parent context.Context, h http.Header, route proxyroute.R
 		return token, resp.StatusCode, retryDelay(resp.Header.Get("Retry-After")), streamErr
 	}
 	if readErr != nil || !finished {
+		if ctx.Err() != nil && parent.Err() == nil {
+			return token, resp.StatusCode, 0, errProbeTransport
+		}
 		return token, resp.StatusCode, retryDelay(resp.Header.Get("Retry-After")), errProbeIncomplete
 	}
 	if resp.Header.Get(turnstate.Header) == "" {
@@ -663,8 +786,8 @@ func (e *Engine) reject(s *session, status int, delay time.Duration, route int) 
 	} else if !l.blocked {
 		l.rejectedStatus = status
 	}
-	if delay < time.Duration(e.config.CooldownSeconds)*time.Second {
-		delay = time.Duration(e.config.CooldownSeconds) * time.Second
+	if delay < time.Duration(e.settings().CooldownSeconds)*time.Second {
+		delay = time.Duration(e.settings().CooldownSeconds) * time.Second
 	}
 	until := time.Now().Add(delay)
 	if until.After(l.retryUntil) {
@@ -694,24 +817,28 @@ func (e *Engine) Status() map[string]any {
 		ID string `json:"id"`
 		turnstate.Status
 		accountPolicy
-		Model                string            `json:"model"`
-		Diagnostic           string            `json:"diagnostic,omitempty"`
-		DiagnosticMessage    string            `json:"diagnostic_message,omitempty"`
-		ObservedBlocks       int               `json:"observed_blocks,omitempty"`
-		ObservedLength       int               `json:"observed_length,omitempty"`
-		CooldownSeconds      int               `json:"cooldown_seconds,omitempty"`
-		LastProbe            time.Time         `json:"last_probe,omitempty"`
-		Phase                string            `json:"phase"`
-		RejectedStatus       int               `json:"rejected_status,omitempty"`
-		RetryAfterSeconds    int               `json:"retry_after_seconds,omitempty"`
-		Nodes                []NodeObservation `json:"nodes"`
-		Cards                []turnstate.Card  `json:"states"`
-		Collection           CollectionStatus  `json:"collection"`
-		ActiveRoute          string            `json:"active_route,omitempty"`
-		UpstreamPauseSeconds int               `json:"upstream_pause_seconds,omitempty"`
+		Model                string             `json:"model"`
+		Diagnostic           string             `json:"diagnostic,omitempty"`
+		DiagnosticMessage    string             `json:"diagnostic_message,omitempty"`
+		ObservedBlocks       int                `json:"observed_blocks,omitempty"`
+		ObservedLength       int                `json:"observed_length,omitempty"`
+		CooldownSeconds      int                `json:"cooldown_seconds,omitempty"`
+		LastProbe            time.Time          `json:"last_probe,omitempty"`
+		Phase                string             `json:"phase"`
+		RejectedStatus       int                `json:"rejected_status,omitempty"`
+		RetryAfterSeconds    int                `json:"retry_after_seconds,omitempty"`
+		Nodes                []NodeObservation  `json:"nodes"`
+		Cards                []turnstate.Card   `json:"states"`
+		Collection           CollectionStatus   `json:"collection"`
+		LastStateCheck       ResponseStateCheck `json:"last_state_check"`
+		LastProbeResult      *NodeObservation   `json:"last_probe_result,omitempty"`
+		Events               []turnstate.Event  `json:"state_events"`
+		ActiveRoute          string             `json:"active_route,omitempty"`
+		UpstreamPauseSeconds int                `json:"upstream_pause_seconds,omitempty"`
 	}
 	states := make([]sessionStatus, 0, len(e.sessions))
 	for _, s := range e.sessions {
+		e.syncRoutes(s, time.Now())
 		state := s.state.Status(time.Now())
 		active, activeOK := s.state.Acquire(time.Now())
 		activeRoute := ""
@@ -739,23 +866,45 @@ func (e *Engine) Status() map[string]any {
 			s.mu.Unlock()
 		}
 		s.mu.Lock()
-		cooldown := max(0, int(time.Until(s.nextProbe).Seconds())+1)
+		cooldown := e.probeSchedule(s, time.Now()).WaitSeconds
 		observedLength := 0
 		if s.observedBlocks > 0 {
 			observedLength = ((57 + 16*s.observedBlocks + 2) / 3) * 4
 		}
 		nodes := make([]NodeObservation, 0, len(s.nodes))
 		for _, node := range s.nodes {
+			node.PoolState = e.pool.Get(node.Route).State
+			for i, route := range e.routes {
+				if route.ID != node.Route {
+					continue
+				}
+				node.PauseUntil = s.nodePauses[i]
+				node.PauseSeconds = max(0, int(time.Until(node.PauseUntil).Seconds())+1)
+				node.RetainedLast = s.retainedLast && s.retainedRoute == i && e.otherEligibleRouteLocked(s, i, time.Now()) < 0
+			}
 			nodes = append(nodes, node)
 		}
 		sort.Slice(nodes, func(i, j int) bool { return nodes[i].Route < nodes[j].Route })
 		collection := e.collectionStatus(s, time.Now())
 		cooldown = max(cooldown, collection.WaitSeconds)
-		states = append(states, sessionStatus{Cards: e.cards(s, time.Now()), Collection: collection, Nodes: nodes, ActiveRoute: activeRoute, UpstreamPauseSeconds: max(0, int(time.Until(s.upstreamPause).Seconds())+1), ID: s.id, Status: state, accountPolicy: s.policy, Model: s.model, Phase: phase, RejectedStatus: status, RetryAfterSeconds: retry, Diagnostic: s.diagnostic, DiagnosticMessage: diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks), ObservedBlocks: s.observedBlocks, ObservedLength: observedLength, CooldownSeconds: cooldown, LastProbe: s.lastProbe})
+		if collection.Reason == "pool_ready" {
+			cooldown = 0
+		}
+		states = append(states, sessionStatus{Events: s.state.Events(), LastStateCheck: s.lastStateCheck, LastProbeResult: s.lastProbeResult, Cards: e.cards(s, time.Now()), Collection: collection, Nodes: nodes, ActiveRoute: activeRoute, UpstreamPauseSeconds: max(0, int(time.Until(s.upstreamPause).Seconds())+1), ID: s.id, Status: state, accountPolicy: s.policy, Model: s.model, Phase: phase, RejectedStatus: status, RetryAfterSeconds: retry, Diagnostic: s.diagnostic, DiagnosticMessage: diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks), ObservedBlocks: s.observedBlocks, ObservedLength: observedLength, CooldownSeconds: cooldown, LastProbe: s.lastProbe})
 		s.mu.Unlock()
 	}
+	modelOrder := map[string]int{}
+	for i, model := range settings.SupportedModels() {
+		modelOrder[model] = i
+	}
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].Model != states[j].Model {
+			return modelOrder[states[i].Model] < modelOrder[states[j].Model]
+		}
+		return states[i].ID < states[j].ID
+	})
 	kind, reason := "official", "已开启注入；只有符合所选账号规则的 state 才会使用。长度是经验规则，不代表模型质量。"
-	if e.config.IsRelay() {
+	if e.settings().IsRelay() {
 		kind, reason = "relay", "中转站使用普通转发，不采集或注入官方 turn-state。"
 	} else if e.disabled.Load() {
 		reason = "已关闭注入；请求按原样转发，不采集 state。"
@@ -764,7 +913,7 @@ func (e *Engine) Status() map[string]any {
 	if e.backup != nil {
 		storage = "memory+private-backup"
 	}
-	return map[string]any{"max_probes_per_round": e.config.MaxProbes, "probe_cooldown_seconds": e.config.CooldownSeconds, "requests_total": e.requests.Load(), "last_request_unix": e.lastRequest.Load(), "upstream_kind": kind, "injection_reason": reason, "injection_enabled": !e.disabled.Load(), "model": e.config.SelectedModel(), "supported_models": settings.SupportedModels(), "account_mode": e.config.AccountMode, "routes": len(e.routes), "sessions": states, "state_storage": storage, "transport": "http-sse"}
+	return map[string]any{"request_slots": map[string]any{"generation_active": len(e.bodySlots), "generation_waiting": e.bodyWaiting.Load(), "generation_limit": cap(e.bodySlots), "feature_active": len(e.featureSlots), "feature_waiting": e.featureWaiting.Load(), "feature_limit": cap(e.featureSlots)}, "pool_nodes": e.PoolStatus(), "foreground_requests": e.foreground.Load(), "max_probes_per_round": e.settings().MaxProbes, "probe_cooldown_seconds": e.settings().CooldownSeconds, "requests_total": e.requests.Load(), "last_request_unix": e.lastRequest.Load(), "upstream_kind": kind, "injection_reason": reason, "injection_enabled": !e.disabled.Load(), "model": e.settings().SelectedModel(), "supported_models": settings.SupportedModels(), "account_mode": e.settings().AccountMode, "routes": len(e.routes), "sessions": states, "state_storage": storage, "transport": "http-sse"}
 }
 func (e *Engine) Close() {
 	for _, r := range e.routes {
@@ -787,7 +936,7 @@ func retryDelay(value string) time.Duration {
 // SetInjection changes future requests only; an in-flight generation keeps its
 // immutable decision. Account rejections survive toggling injection.
 func (e *Engine) SetInjection(enabled bool) {
-	disabled := !enabled || e.config.IsRelay()
+	disabled := !enabled || e.settings().IsRelay()
 	if e.disabled.Swap(disabled) != disabled {
 		e.injectionEpoch.Add(1)
 		e.signal()
@@ -840,6 +989,12 @@ func diagnosticMessage(code string, p accountPolicy, observed int) string {
 		return "上游返回已持有的同一张 state，没有增加备用；按失败间隔等待后再补采。"
 	case "failure_interval":
 		return "上次补采未成功，按失败间隔等待后再试下一个节点。"
+	case "round_cooldown":
+		return "本批采集结束，等待默认批次间隔后继续；没有主用时也遵守此等待，可手动随机采集一次。"
+	case "missing_active":
+		return "没有可用主用 state，按批次间隔寻找剩余节点；可手动随机采集一次，仍受上游暂停和总预算约束。"
+	case "upstream_pause":
+		return "上游要求等待，额外采集将在暂停结束后恢复；没有主用 state 也不能跳过此等待。"
 	case "search_budget":
 		return "连续失败次数已达到预算，暂停一段时间后自动恢复；仍遵守每小时总预算。"
 	case "hourly_budget":
@@ -861,26 +1016,33 @@ func diagnosticMessage(code string, p accountPolicy, observed int) string {
 	case "invalid_state_envelope":
 		return "上游返回的 state 格式无法识别；未注入该值。"
 	case "model_capacity":
-		return "上游明确返回模型繁忙或容量不足。本轮已停止，不会靠更换出口继续尝试；可等待上游恢复，或由你手动选择其它可用模型。"
+		return "当前节点返回模型繁忙或容量不足，继续尝试下一节点；仍遵守本轮次数、轮间间隔及采集总预算。"
 	case "upstream_rate_limited":
 		return "上游对请求或补采限流；已暂停额外探测，仍合格的 state 继续按原来源节点使用。正式 AI 请求收到限流时才会暂停该账号。"
 	case "response_failed":
-		return "上游在 HTTP 200 回复流中明确报告失败，未采集该 state，本轮已停止；不是单纯没有收到结束事件。"
+		return "上游在 HTTP 200 回复流中报告失败，本次未入库，继续尝试下一节点；明确的登录错误或限流仍会暂停。"
 	case "incomplete_response":
 		return "探测回复未完整结束，可能超时或被中断；不会把半截回复作为采集成功。"
 	case "network_failed":
-		return "连接上游失败或超时；请检查代理和路由页面的连通性。"
+		return "节点连接失败或超时，已移入失败列表，不自动恢复；继续尝试下一节点，可在节点状态中手动放回。"
 	case "upstream_rejected":
 		return "上游拒绝了探测请求；401 / 403 会暂停该账号，429 只暂停补采，不会清除或阻断仍合格的 state。"
 	default:
 		return "尚无采集结果。收到该模型请求后才会开始连续采集。"
 	}
 }
-func (s *session) unavailableMessage() (string, int) {
+func (e *Engine) unavailableMessage(s *session) (string, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	seconds := max(1, int(time.Until(s.nextProbe).Seconds())+1)
-	return "后台正在连续寻找合格 state；当前严格模式暂不转发正式请求，这是本地拦截。" + diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks) + " 可在面板明确关闭注入，使用普通转发。", seconds
+	schedule := e.probeSchedule(s, time.Now())
+	seconds := max(1, schedule.WaitSeconds)
+	diagnostic := s.diagnostic
+	if schedule.WaitSeconds > 0 {
+		diagnostic = schedule.Reason
+	} else if diagnostic == "round_cooldown" || diagnostic == "success_cooldown" {
+		diagnostic = "missing_active"
+	}
+	return "后台正在连续寻找合格 state；当前严格模式暂不转发正式请求，这是本地拦截。" + diagnosticMessage(diagnostic, s.policy, s.observedBlocks) + " 可在面板明确关闭注入，使用普通转发。", seconds
 }
 
 // RetryState is a bounded manual retry of an existing RAM-only session. The
@@ -903,15 +1065,10 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...s
 	}
 	s := selected
 	s.mu.Lock()
-	if s.probing != nil {
+	if s.probing != nil || s.queued {
 		s.mu.Unlock()
 		e.mu.Unlock()
 		return errors.New("该会话正在采集，请等待本轮结束")
-	}
-	if s.busy > 0 {
-		s.mu.Unlock()
-		e.mu.Unlock()
-		return errors.New("该会话正在处理请求，请等待回复结束后再试")
 	}
 	if !s.activated {
 		s.mu.Unlock()
@@ -926,8 +1083,8 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...s
 		}
 		return fmt.Errorf("上游返回 %d，请先在 Codex 处理登录或访问权限；不会更换出口重试", status)
 	}
-	if time.Now().Before(s.nextProbe) {
-		seconds := max(1, int(time.Until(s.nextProbe).Seconds())+1)
+	if schedule := e.probeSchedule(s, time.Now()); schedule.WaitSeconds > 0 {
+		seconds := schedule.WaitSeconds
 		s.mu.Unlock()
 		e.mu.Unlock()
 		return fmt.Errorf("尚未到下次采集时间，请等待 %d 秒；手动采集也遵守失败间隔和总预算", seconds)
@@ -938,9 +1095,10 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...s
 		return errors.New("当前 state 仍可用，无需重复采集；不会清除正在使用的状态")
 	}
 	s.busy++
+	s.queued = true
 	s.mu.Unlock()
 	e.mu.Unlock()
-	defer release(s)
+	defer releaseWork(s)
 	if len(routeIDs) > 0 && routeIDs[0] != "" {
 		index := -1
 		for i, r := range e.routes {
@@ -952,7 +1110,7 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...s
 		if index < 0 {
 			return errors.New("节点已不存在，请刷新代理池")
 		}
-		if e.pool.Get(routeIDs[0]).State == "disabled" {
+		if state := e.pool.Get(routeIDs[0]).State; state == "disabled" || state == "failed" {
 			return errors.New("请先将已清理节点放回可用池")
 		}
 		e.refresh(ctx, s, false, index)
@@ -980,7 +1138,7 @@ func (e *Engine) RetryState(ctx context.Context, sessionID string, routeIDs ...s
 	if _, usable := s.state.Acquire(time.Now()); usable {
 		return nil
 	}
-	message, _ := s.unavailableMessage()
+	message, _ := e.unavailableMessage(s)
 	return errors.New(message)
 }
 

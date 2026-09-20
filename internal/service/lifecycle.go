@@ -20,7 +20,12 @@ type advancedPreferences struct {
 }
 
 func advancedFrom(c settings.Config) advancedPreferences {
-	return advancedPreferences{c.NodeNetworkMode, c.NodeInterface, c.ExternalProxyOnly, int(c.RequestBytes() >> 20), int(c.WindowBytes() >> 20), int(c.CompactBytes() >> 20), c.EgressMode, c.EgressRoute, c.PoolEnabled}
+	v := advancedPreferences{c.NodeNetworkMode, c.NodeInterface, c.ExternalProxyOnly, int(c.RequestBytes() >> 20), int(c.WindowBytes() >> 20), int(c.CompactBytes() >> 20), c.EgressMode, c.EgressRoute, c.PoolEnabled}
+	if c.PinnedRoute != "" {
+		v.EgressMode = "fixed"
+		v.EgressRoute = c.PinnedRoute
+	}
+	return v
 }
 func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Context) {
 	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
@@ -35,7 +40,7 @@ func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			fail(err)
 			return
 		}
-		if v.RequestLimitMiB == 0 || v.ZstdWindowMiB == 0 || v.CompactLimitMiB == 0 {
+		if v.RequestLimitMiB == 0 || v.ZstdWindowMiB == 0 {
 			fail(errors.New("请完整填写上限，不能为零"))
 			return
 		}
@@ -45,7 +50,7 @@ func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			next.NodeNetworkMode, next.NodeInterface = v.NodeNetworkMode, v.NodeInterface
 		}
 		next.ExternalProxyOnly = v.ExternalProxyOnly
-		next.RequestLimitMiB, next.ZstdWindowMiB, next.CompactLimitMiB = v.RequestLimitMiB, v.ZstdWindowMiB, v.CompactLimitMiB
+		next.RequestLimitMiB, next.ZstdWindowMiB = v.RequestLimitMiB, v.ZstdWindowMiB
 		next.EgressMode, next.EgressRoute, next.PoolEnabled = v.EgressMode, v.EgressRoute, v.PoolEnabled
 		if v.EgressMode == "fixed" {
 			if v.EgressRoute == "" {
@@ -57,14 +62,13 @@ func (c *control) poolAPI(w http.ResponseWriter, r *http.Request, ctx context.Co
 			next.PinnedRoute, next.EgressMode, next.EgressRoute = v.EgressRoute, "state", ""
 		} else {
 			next.EgressRoute = ""
-			next.PinnedRoute = ""
 		}
 		if err := c.applyConfig(ctx, next); err != nil {
 			fail(err)
 			return
 		}
-		reply(w, 200, map[string]string{"message": "已备份并保存。新设置立即生效，旧 state 缓存已清空；池中已用/失败记录保留，不清除上游限流。"})
-	case "/admin/api/pool":
+		reply(w, 200, map[string]string{"message": "已备份并保存。新设置立即生效，仍合格的 state 已从本机备份恢复；池中已用/失败记录保留，不清除上游限流。"})
+	case "/admin/api/pool", "/admin/api/pool/status":
 		if c.engine == nil {
 			fail(errors.New("请先导入可用代理来源；配置未就绪"))
 			return

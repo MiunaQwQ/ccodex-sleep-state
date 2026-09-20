@@ -37,5 +37,8 @@ func (s *Store) Cards(now time.Time, route func(int) (string, string)) []Card {
 	for _, candidate := range s.standby {
 		add(candidate, "standby")
 	}
+	for _, candidate := range s.parked {
+		add(candidate, "parked")
+	}
 	return result
 }

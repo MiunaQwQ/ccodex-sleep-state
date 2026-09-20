@@ -41,6 +41,11 @@ type sourceRequest struct {
 }
 
 func (c *control) candidate(v sourceRequest) (settings.Config, error) {
+	var err error
+	v, err = normalizeSource(v)
+	if err != nil {
+		return c.config, err
+	}
 	next := c.config
 	next.Direct = false
 	if !v.Append {
@@ -63,6 +68,31 @@ func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 	}
 	source := settings.Source{UserAgent: v.UserAgent, ExcludeKeywords: v.Exclude, IncludeProtocols: v.Protocols}
 	switch v.Mode {
+	case "mixed":
+		for _, raw := range strings.Split(v.Value, "\n") {
+			raw = strings.TrimSpace(raw)
+			if raw == "" || strings.HasPrefix(raw, "#") {
+				continue
+			}
+			if isSubscriptionSource(raw) {
+				entry := source
+				entry.URL = raw
+				next.Subscriptions = appendSource(next.Subscriptions, entry)
+			} else {
+				found := false
+				for _, old := range next.ProxyURLs {
+					if old == raw {
+						found = true
+					}
+				}
+				if !found {
+					next.ProxyURLs = append(next.ProxyURLs, raw)
+				}
+			}
+		}
+		if len(next.ProxyURLs) == 0 && len(next.Subscriptions) == 0 {
+			return next, errors.New("导入内容为空")
+		}
 	case "direct":
 		next.Direct = true
 	case "proxy":
@@ -128,6 +158,14 @@ func routeList(routes []proxyroute.Route) []map[string]any {
 }
 
 func (c *control) api(w http.ResponseWriter, r *http.Request) {
+	// The lifecycle list is a snapshot, including the legacy POST used by older panels.
+	if (r.URL.Path == "/admin/api/pool/status" && r.Method == "GET") ||
+		(r.URL.Path == "/admin/api/pool" && r.Method == "POST") {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		c.poolAPI(w, r, r.Context())
+		return
+	}
 	if r.URL.Path == "/admin/api/pool" && r.Method == "GET" {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
@@ -146,12 +184,28 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		reply(w, 405, map[string]string{"error": "此操作需要 POST"})
 		return
 	}
-	// One management operation at a time. Never queue a chain of test requests.
-	if !c.action.TryLock() {
-		reply(w, 409, map[string]string{"error": "另一个管理操作还没完成，请稍后再试"})
+	if r.URL.Path == "/admin/api/nodes/resume" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		var v struct {
+			SessionID string `json:"session_id"`
+			RouteID   string `json:"route_id"`
+		}
+		if err := decode(w, r, &v); err != nil {
+			reply(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if c.engine == nil {
+			reply(w, 409, map[string]string{"error": "服务尚未准备好"})
+			return
+		}
+		if err := c.engine.ResumeNode(v.SessionID, v.RouteID); err != nil {
+			reply(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		reply(w, 200, map[string]string{"message": "已手动恢复节点并解除该模型下的暂停；当前对话、轮间等待和采集预算保持不变。"})
 		return
 	}
-	defer c.action.Unlock()
 	if r.URL.Path == "/admin/api/pool/test" || r.URL.Path == "/admin/api/pool/test-stop" {
 		c.mu.RLock()
 		defer c.mu.RUnlock()
@@ -162,11 +216,27 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		c.nodeTestAction(w, r)
 		return
 	}
+	// One management operation at a time. Never queue a chain of test requests.
+	if !c.action.TryLock() {
+		reply(w, 409, map[string]string{"error": "另一个管理操作还没完成，请稍后再试"})
+		return
+	}
+	defer c.action.Unlock()
+	if r.URL.Path == "/admin/api/state/retry" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		c.retryStateAction(w, r)
+		return
+	}
 	if !c.mu.TryLock() {
-		reply(w, 409, map[string]string{"error": "Codex 正在处理请求，等这次回复结束后再操作"})
+		reply(w, 409, map[string]string{"error": "此操作会重建连接或修改配置，请等当前 AI 请求结束后再保存；节点状态、刷新和延迟测试仍可使用"})
 		return
 	}
 	defer c.mu.Unlock()
+	if c.activeRequests.Load() > 0 && r.URL.Path != "/admin/api/timing" && r.URL.Path != "/admin/api/state-policy" && r.URL.Path != "/admin/api/pool/change" {
+		reply(w, 409, map[string]string{"error": "当前有 AI 请求，连接变更需等待；采集时间、节点状态和测试可随时操作"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
@@ -252,34 +322,6 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(w, 200, map[string]string{"message": "本机配置已备份并接入，尚未验证外网或模型。请重启 Codex 并发一条消息；采不到合格 state 时先普通转发。"})
-	case "/admin/api/state/retry":
-		var v struct {
-			ID      string `json:"id"`
-			RouteID string `json:"route_id,omitempty"`
-		}
-		if err := decode(w, r, &v); err != nil {
-			fail(err)
-			return
-		}
-		if c.rescue || c.engine == nil || c.setupError != "" || c.routeError != "" {
-			fail(errors.New("服务尚未接入，请先处理配置或出口问题"))
-			return
-		}
-		if err := c.checkManaged(); err != nil {
-			fail(errors.New("Codex 配置已改变，请先检查与修复配置"))
-			return
-		}
-		var err error
-		if v.RouteID != "" {
-			err = c.engine.RetryState(ctx, v.ID, v.RouteID)
-		} else {
-			err = c.engine.RetryState(ctx, v.ID)
-		}
-		if err != nil {
-			fail(err)
-			return
-		}
-		reply(w, 200, map[string]string{"message": "本轮采集已完成。请查看会话里的实际长度和结果；采不到时不会自动重复消耗额度。"})
 	case "/admin/api/codex-config/preview":
 		value, err := c.cleanPreview()
 		if err != nil {
@@ -414,11 +456,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("请先修复服务配置，再保存采集时间"))
 			return
 		}
-		if err := c.applyPreferences(ctx, c.config.Model, c.config.AccountMode, c.config.StateFallback, v); err != nil {
+		if err := c.applyTiming(v); err != nil {
 			fail(err)
 			return
 		}
-		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。仍合格的本机 state 备份会恢复；新有效期或上限可能淘汰旧牌。采集预算和上游限流不会被重置。"})
+		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。没有重建节点或清空会话；新有效期或上限可能淘汰旧牌。采集预算和上游限流不会被重置。"})
 	case "/admin/api/preferences":
 		var v struct {
 			Model         string `json:"model"`
@@ -482,7 +524,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.URL.Path == "/admin/api/sources/test" {
 			defer closeRoutes(routes)
-			reply(w, 200, map[string]any{"message": "订阅获取、解析和出站配置构建通过。尚未连接出口，也没有发送模型请求。", "routes": routeList(routes)})
+			reply(w, 200, map[string]any{"message": "订阅获取、解析和出站配置构建通过。尚未连接出口，也没有发送模型请求。", "routes": routeList(routes), "diff": importDiff(c.catalog, routes), "exclude_keywords": v.Exclude})
 			return
 		}
 		// Appending sources can still remove a previously selected node when a
@@ -643,4 +685,42 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(w, 404, map[string]string{"error": "没有这个管理接口"})
 	}
+}
+
+// Manual collection may wait on the network, but does not replace the engine.
+// Keep snapshots and independent latency tests available while it runs.
+func (c *control) retryStateAction(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
+	var v struct {
+		ID         string `json:"id"`
+		RouteID    string `json:"route_id,omitempty"`
+		RandomOnce bool   `json:"random_once,omitempty"`
+	}
+	if err := decode(w, r, &v); err != nil {
+		fail(err)
+		return
+	}
+	if c.rescue || c.engine == nil || c.setupError != "" || c.routeError != "" {
+		fail(errors.New("服务尚未接入，请先处理配置或出口问题"))
+		return
+	}
+	if err := c.checkManaged(); err != nil {
+		fail(errors.New("Codex 配置已改变，请先检查与修复配置"))
+		return
+	}
+	var err error
+	if v.RandomOnce {
+		err = c.engine.RetryRandomState(ctx, v.ID)
+	} else if v.RouteID != "" {
+		err = c.engine.RetryState(ctx, v.ID, v.RouteID)
+	} else {
+		err = c.engine.RetryState(ctx, v.ID)
+	}
+	if err != nil {
+		fail(err)
+		return
+	}
+	reply(w, 200, map[string]string{"message": "本轮采集已完成。请查看会话里的实际长度和结果；采不到时不会自动重复消耗额度。"})
 }

@@ -168,6 +168,7 @@ func TestFailedRouteMovesToNextSelectedRoute(t *testing.T) {
 	cfg := settings.Default()
 	cfg.Upstream = "http://127.0.0.1:12345/backend-api/codex"
 	cfg.MaxProbes = 1
+	cfg.Collection.Cadence = "backoff"
 	cfg.Collection.FailureIntervalSeconds = 0
 	cfg.Collection.FailureMaxIntervalSeconds = 0
 	e := New(cfg, []proxyroute.Route{route("bad", bad.URL), route("good", good.URL)}, slog.New(slog.NewTextHandler(io.Discard, nil)))

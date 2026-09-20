@@ -17,6 +17,15 @@ func routeSelected(c settings.Config, id string) bool {
 	if c.PinnedRoute != "" {
 		return c.PinnedRoute == id
 	}
+	return routeCandidateSelected(c, id)
+}
+
+// Keep selected alternatives loaded while pinned, so a failed pinned node can
+// be skipped without rebuilding the engine or touching an in-flight request.
+func routeCandidateSelected(c settings.Config, id string) bool {
+	if c.PinnedRoute == id {
+		return true
+	}
 	if len(c.SelectedRoutes) == 0 {
 		return true
 	}
@@ -74,7 +83,7 @@ func (c *control) poolStatus() map[string]any {
 		for k, v := range original {
 			row[k] = v
 		}
-		row["selected"] = routeSelected(c.config, row["id"].(string))
+		row["selected"] = routeCandidateSelected(c.config, row["id"].(string))
 		routes = append(routes, row)
 	}
 	return map[string]any{"sources": sources, "routes": routes, "pinned_route": c.config.PinnedRoute, "selected_routes": c.config.SelectedRoutes}
@@ -147,8 +156,7 @@ func (c *control) poolAction(w http.ResponseWriter, r *http.Request, ctx context
 		// Selecting candidates must not silently cancel an explicit fixed node.
 		// The card-level "取消固定" action is the only way to return to auto.
 		// Saving the candidate list enables the continuous proxy pool. Nodes are
-		// health observations and remain eligible after a probe; only a manual
-		// disable removes one from automatic collection.
+		// health observations; transport failures stay failed until manually restored.
 		next.PoolEnabled = true
 		next.EgressMode, next.EgressRoute = "state", ""
 		next.StateRefreshMode = "on_demand"

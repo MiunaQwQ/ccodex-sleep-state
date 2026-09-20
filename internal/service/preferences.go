@@ -132,3 +132,47 @@ func (c *control) applyConfig(ctx context.Context, next settings.Config) error {
 	published = true
 	return nil
 }
+
+func (c *control) applyTiming(t timingPreferences) error {
+	if c.managed {
+		if err := c.checkManaged(); err != nil {
+			return errors.New("Codex 连接已改变，请先检查与修复配置")
+		}
+	}
+	if c.engine != nil && c.engine.Restricted() {
+		return errors.New("上游拒绝或限流仍未解除，采集时间暂不修改")
+	}
+	for _, id := range []string{c.config.PinnedRoute, c.config.EgressRoute} {
+		if id == "" {
+			continue
+		}
+		found := false
+		for _, row := range c.catalog {
+			if row["id"] == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("固定出口已不在当前节点清单中，设置未保存")
+		}
+	}
+
+	next := c.config
+	next.ProbeSeconds, next.RefreshSeconds, next.CooldownSeconds = t.ProbeSeconds, t.RefreshSeconds, t.CooldownSeconds
+	next.MaxProbes, next.TTLSeconds = t.MaxProbes, t.TTLSeconds
+	if t.Collection != nil {
+		next.Collection = *t.Collection
+	}
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	if err := c.persist(next); err != nil {
+		return err
+	}
+	c.config = next
+	if c.engine != nil {
+		c.engine.UpdateTiming(next)
+	}
+	return nil
+}

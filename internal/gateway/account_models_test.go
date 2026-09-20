@@ -184,12 +184,12 @@ func TestCompactionDoesNotDependOnCollection(t *testing.T) {
 	body := `{"model":"gpt-5.6-terra","input":[],"instructions":"compact"}`
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if r.URL.Path != "/backend-api/codex/responses" {
-			t.Error("legacy bridge did not use V2 endpoint")
+		if r.URL.Path != "/backend-api/codex/responses/compact" {
+			t.Error("native compact endpoint was rewritten")
 		}
 		b, _ := io.ReadAll(r.Body)
-		if !remoteCompactionV2(b) {
-			t.Error("missing official compaction trigger")
+		if string(b) != body {
+			t.Error("native compact body was rewritten")
 		}
 		if r.Header.Get(turnstate.Header) != "client-owned-state" {
 			t.Error("compaction state header modified")
@@ -417,6 +417,7 @@ func TestStateFallbackNeverBypassesAccountRejection(t *testing.T) {
 func TestFailedCollectionBackoffBlocksManualRetryAndKeepsOpaqueSessionID(t *testing.T) {
 	var calls atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); complete(w, fakeToken(11, 31)) }))
+	e.config.Collection.FailureIntervalSeconds = 0
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "manual-retry-token"))
 	var s *session
@@ -429,7 +430,11 @@ func TestFailedCollectionBackoffBlocksManualRetryAndKeepsOpaqueSessionID(t *test
 	if err := e.RetryState(context.Background(), s.id); err == nil {
 		t.Fatal("bad state became accepted")
 	}
-	if calls.Load() != 1 {
+	// Zero-start permits one immediate retry, then waits 30 seconds.
+	if err := e.RetryState(context.Background(), s.id); err == nil {
+		t.Fatal("manual retry ignored second-failure backoff")
+	}
+	if calls.Load() != 2 {
 		t.Fatal("manual retry bypassed failure backoff")
 	}
 	s.mu.Lock()
@@ -476,16 +481,16 @@ func TestManualRetryDoesNotClearReadyStateOrAccountLimits(t *testing.T) {
 	}
 }
 
-func TestManualRetryReportsBusyAndSuccess(t *testing.T) {
+func TestManualRetryRequiresActivationAndAllowsForeground(t *testing.T) {
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { complete(w, fakeToken(10, 33)) }))
 	s, err := e.borrow(request(generation, "manual-busy-token").Header)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = e.RetryState(context.Background(), s.id); err == nil || !strings.Contains(err.Error(), "处理请求") {
-		t.Fatalf("busy error=%v", err)
+	defer release(s)
+	if err = e.RetryState(context.Background(), s.id); err == nil || !strings.Contains(err.Error(), "尚未开始采集") {
+		t.Fatalf("activation error=%v", err)
 	}
-	release(s)
 	s.mu.Lock()
 	s.activated = true
 	s.mu.Unlock()
@@ -558,14 +563,14 @@ func TestInjectionOffPreservesClientOwnedState(t *testing.T) {
 	}
 }
 
-func TestStateFallbackPreservesClientOwnedStateButProbeDoesNotUseIt(t *testing.T) {
+func TestManagedStateFallbackAndProbeDoNotReuseClientState(t *testing.T) {
 	var probes, generations atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if string(body) == generation {
 			generations.Add(1)
-			if r.Header.Get(turnstate.Header) != "client-fallback-state" {
-				t.Error("fallback changed client-owned state")
+			if r.Header.Get(turnstate.Header) != "" {
+				t.Error("managed fallback bypassed empty pool using client state")
 			}
 		} else {
 			probes.Add(1)

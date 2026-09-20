@@ -108,3 +108,16 @@ func TestCandidateSelectionEnablesContinuousOnDemandWorkflow(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestPinnedNodeKeepsSelectedAlternativesLoaded(t *testing.T) {
+	c, h := panelControl(t, func(c *settings.Config) {
+		c.Direct = false
+		c.ProxyURLs = []string{"socks5://127.0.0.1:10801", "socks5://127.0.0.1:10802"}
+	})
+	id := c.catalog[0]["id"].(string)
+	payload, _ := json.Marshal(map[string]string{"id": id})
+	w := panelPost(h, "routes/pin", string(payload))
+	if w.Code != 200 || c.engine.Status()["routes"] != 2 || c.config.PinnedRoute != id {
+		t.Fatal("pinning discarded failover candidates", w.Code)
+	}
+}

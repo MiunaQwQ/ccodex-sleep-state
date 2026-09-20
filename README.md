@@ -10,7 +10,7 @@
 
 [Windows 上手](docs/windows.md) · [macOS 上手](docs/macos.md) · [面板教程](docs/web-panel.md) · [代理与订阅](docs/proxies.md) · [问题与验收清单](docs/issues-and-verification.md) · [测试记录](docs/testing.md) · [联系与交流](#一起试一起反馈)
 
-> **当前仍是公开测试版。** 此 README 描述当前源码；下载时以对应 Release 的说明为准，旧发布包不会自动多出新功能。本轮真实 Sol 回复、V2 远程压缩及压缩后回复、Terra 回复已跑通；追加的两次 Astra 短回复也成功，但本轮仍没有采到合格 292；旧式 V1 压缩直连上游返回 404，Team 仍只做合成测试。不能把部分成功写成全部验收通过。具体边界见[问题与验收清单](docs/issues-and-verification.md)。
+> **当前仍是公开测试版。** 此 README 描述当前源码；下载时以对应 Release 的说明为准，旧发布包不会自动多出新功能。远程压缩现在原样转发官方 `/responses/compact`，新版 V2 仍使用 `/responses` 的 `compaction_trigger`；两条路径都不依赖 state 采集。真实上游、Team 和长期运行仍需分别验收，具体边界见[问题与验收清单](docs/issues-and-verification.md)。
 
 ## 下载后，怎么开始
 
@@ -95,7 +95,7 @@ macOS：
 
 最稳妥的切换顺序还是：**停止本服务 → CCS 切换 → 启动本服务 → 重启 Codex。** 兼容不是让两个程序同时抢写同一份配置。
 
-远程上下文压缩单独验收：本轮真实 Sol 的新版 V2 压缩及压缩后继续回复已成功；旧式 V1 直连上游返回 404，发送前桥接已在本地模拟客户端通过，但追加真实验收的第一条 Sol 回复发生出口传输失败，不能写成所有压缩方式都已跑通。[压缩问题进展](docs/issues-and-verification.md#p01-远程上下文压缩优先项)
+远程上下文压缩单独验收：V1 `/responses/compact` 现在原样转发，不再改写成普通 `/responses` 或追加触发项；V2 仍按官方 `compaction_trigger` 流程转发。压缩不会等待 state，也不会因响应缺少 state 头而拦截。[压缩问题进展](docs/issues-and-verification.md#p01-远程上下文压缩优先项)
 
 ## 有问题，先看这几项
 

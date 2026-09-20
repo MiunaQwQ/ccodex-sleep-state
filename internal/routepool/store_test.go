@@ -66,3 +66,32 @@ func TestCorruptPoolFailsClosed(t *testing.T) {
 		t.Fatal("corruption reset silently")
 	}
 }
+
+func TestLateProbeCannotRestoreFailedOrDisabledNode(t *testing.T) {
+	for _, state := range []string{"failed", "disabled"} {
+		s, _ := Open("")
+		if err := s.ClaimProbe("node", false); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Change([]string{"node"}, state, "network_failed", false); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.FinishProbe("node", "available", "accepted"); err != nil {
+			t.Fatal(err)
+		}
+		if s.Get("node").State != state {
+			t.Fatal("late probe restored node")
+		}
+	}
+}
+
+func TestRetestCannotUndoNewerDisable(t *testing.T) {
+	s, _ := Open("")
+	s.Change([]string{"node"}, "failed", "network_failed", false)
+	old := s.Get("node")
+	s.Change([]string{"node"}, "disabled", "manual", false)
+	restored, err := s.RecoverTested("node", old.Updated)
+	if restored || err != nil || s.Get("node").State != "disabled" {
+		t.Fatal("late test undid user disable")
+	}
+}

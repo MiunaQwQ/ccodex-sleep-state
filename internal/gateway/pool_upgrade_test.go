@@ -40,7 +40,8 @@ func TestShapeChangePreservesAnswerAndPromotesStandbyWithoutReplay(t *testing.T)
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		w.Header().Set(turnstate.Header, fakeToken(11, 3))
-		w.Write([]byte("completed-answer"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[\"completed-answer\"]}}\n\n"))
 	}))
 	r := request(generation, "fixture-promote-key")
 	s, err := e.borrow(r.Header)
