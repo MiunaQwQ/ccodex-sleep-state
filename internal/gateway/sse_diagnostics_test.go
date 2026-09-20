@@ -58,7 +58,7 @@ func TestFailedStreamCannotBeOverriddenByCompleted(t *testing.T) {
 	}
 }
 
-func TestCapacityEndsProbeRoundWithoutExitRotationOrStateHeader(t *testing.T) {
+func TestCapacityContinuesRoundWithinBudget(t *testing.T) {
 	var calls atomic.Int32
 	e, logs := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -66,10 +66,12 @@ func TestCapacityEndsProbeRoundWithoutExitRotationOrStateHeader(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_is_overloaded\",\"message\":\"SECRET organization details\"}}}\n\n")
 	}))
 	e.routes = append(e.routes, e.routes[0], e.routes[0])
+	e.routes[1].ID, e.routes[2].ID = "candidate-1", "candidate-2"
+	e.config.Collection.Cadence = "round"
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "capacity-account"))
-	if w.Code != 503 || calls.Load() != 1 {
-		t.Fatalf("capacity rotated exits: status=%d calls=%d", w.Code, calls.Load())
+	if w.Code != 503 || calls.Load() != 3 {
+		t.Fatalf("capacity did not continue: status=%d calls=%d", w.Code, calls.Load())
 	}
 	status, _ := json.Marshal(e.Status())
 	if !strings.Contains(string(status), `"diagnostic":"model_capacity"`) {
@@ -80,43 +82,50 @@ func TestCapacityEndsProbeRoundWithoutExitRotationOrStateHeader(t *testing.T) {
 	}
 }
 
-func TestStreamRateLimitBlocksAllModelsAndRoutes(t *testing.T) {
+func TestProbeStreamRateLimitDoesNotBlockSuccessfulOrdinaryFallback(t *testing.T) {
 	for _, code := range []string{"rate_limit_exceeded", "insufficient_quota"} {
 		t.Run(code, func(t *testing.T) {
 			var calls atomic.Int32
 			e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
+				n := calls.Add(1)
+				if n%2 == 0 {
+					complete(w, fakeToken(10, 81))
+					return
+				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set(turnstate.Header, fakeToken(10, 81))
 				fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":%q}}}\n\n", code)
 			}))
 			e.routes = append(e.routes, e.routes[0], e.routes[0])
+			e.routes[1].ID, e.routes[2].ID = "candidate-1", "candidate-2"
 			e.config.StateFallback = "passthrough"
 			for _, model := range settings.SupportedModels() {
 				w := httptest.NewRecorder()
 				e.ServeHTTP(w, request(strings.ReplaceAll(generation, settings.Model, model), "stream-rate-limited"))
-				if w.Code != 429 {
-					t.Fatalf("SSE account restriction lost for %s: %d", model, w.Code)
+				if w.Code != 200 {
+					t.Fatalf("probe stream limit must not block normal fallback for %s: %d", model, w.Code)
 				}
 			}
-			if calls.Load() != 1 || !e.Restricted() {
-				t.Fatalf("bypassed SSE rate limit calls=%d", calls.Load())
+			if calls.Load() != int32(len(settings.SupportedModels())*2) || e.Restricted() {
+				t.Fatalf("probe stream limit leaked into account guard calls=%d", calls.Load())
 			}
 		})
 	}
 }
 
-func TestUnknownFailedEventStopsProbeRound(t *testing.T) {
+func TestUnknownFailedEventContinuesRound(t *testing.T) {
 	var calls atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"future-code\"}}}\n\n")
 	}))
 	e.routes = append(e.routes, e.routes[0], e.routes[0])
+	e.routes[1].ID, e.routes[2].ID = "candidate-1", "candidate-2"
+	e.config.Collection.Cadence = "round"
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "failed-round-account"))
-	if w.Code != 503 || calls.Load() != 1 {
-		t.Fatalf("failed event rotated exits: %d %d", w.Code, calls.Load())
+	if w.Code != 503 || calls.Load() != 3 {
+		t.Fatalf("failed event did not continue: %d %d", w.Code, calls.Load())
 	}
 	status, _ := json.Marshal(e.Status())
 	if !strings.Contains(string(status), `"diagnostic":"response_failed"`) {

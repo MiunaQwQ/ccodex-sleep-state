@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gylive/ccodex-sleep-state/internal/netpath"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 	"github.com/metacubex/mihomo/adapter"
 	C "github.com/metacubex/mihomo/constant"
@@ -33,8 +34,10 @@ type Route struct {
 	StableID string
 	// DisplayName and Protocol are for the authenticated local panel, never logs.
 	DisplayName string
+	Connection  string
 	Protocol    string
 	Transport   *http.Transport
+	NodePath    *netpath.Path
 	close       func() error
 }
 
@@ -58,21 +61,29 @@ func baseTransport() *http.Transport {
 		MaxIdleConns: 32, MaxIdleConnsPerHost: 8, MaxConnsPerHost: 16, MaxResponseHeaderBytes: 1 << 20}
 }
 
-func Build(node map[string]any, index int) (Route, error) {
+func Build(node map[string]any, index int, paths ...*netpath.Path) (Route, error) {
 	id := fmt.Sprintf("route-%03d", index+1)
 	if err := validateNode(node); err != nil {
 		return Route{}, err
 	}
 	copyNode := make(map[string]any, len(node))
 	for k, v := range node {
-		copyNode[k] = v
+		if k != "__source_uri" {
+			copyNode[k] = v
+		}
 	}
 	stableID, err := nodeIdentity(copyNode)
 	if err != nil {
 		return Route{}, err
 	}
 	copyNode["name"] = id
-	proxy, err := adapter.ParseProxy(copyNode)
+	var path *netpath.Path
+	var options []adapter.ProxyOption
+	if len(paths) > 0 && paths[0] != nil {
+		path = paths[0]
+		options = append(options, adapter.WithDialerForAPI(path))
+	}
+	proxy, err := adapter.ParseProxy(copyNode, options...)
 	if err != nil {
 		return Route{}, errors.New("node rejected by outbound core; check protocol fields")
 	}
@@ -89,7 +100,12 @@ func Build(node map[string]any, index int) (Route, error) {
 		return conn, nil
 	}
 	protocol, _ := node["type"].(string)
-	return Route{ID: id, StableID: stableID, DisplayName: nodeDisplayName(node, protocol), Protocol: protocol, Transport: tr, close: proxy.Close}, nil
+	connection, _ := node["__source_uri"].(string)
+	if connection == "" {
+		encoded, _ := json.Marshal(map[string]any{"proxies": []any{node}})
+		connection = string(encoded)
+	}
+	return Route{Connection: connection, ID: id, StableID: stableID, DisplayName: nodeDisplayName(node, protocol), Protocol: protocol, Transport: tr, NodePath: path, close: proxy.Close}, nil
 }
 
 // Labels come only from a subscription's explicit display name, never from
@@ -124,7 +140,7 @@ func nodeDisplayName(node map[string]any, protocol string) string {
 func nodeIdentity(node map[string]any) (string, error) {
 	canonical := make(map[string]any, len(node))
 	for key, value := range node {
-		if key != "name" {
+		if key != "name" && key != "__source_uri" {
 			canonical[key] = value
 		}
 	}
@@ -138,6 +154,10 @@ func nodeIdentity(node map[string]any) (string, error) {
 
 func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 	QuietCore()
+	path, err := netpath.New(ctx, c.NodeNetworkMode, c.NodeInterface)
+	if err != nil {
+		return nil, err
+	}
 	var routes []Route
 	success := false
 	defer func() {
@@ -148,7 +168,11 @@ func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 		}
 	}()
 	if c.Direct {
-		routes = append(routes, Route{ID: "direct", StableID: "direct", DisplayName: "直连", Protocol: "direct", Transport: baseTransport()})
+		tr := baseTransport()
+		if path != nil {
+			tr.DialContext = path.DialContext
+		}
+		routes = append(routes, Route{ID: "direct", StableID: "direct", DisplayName: "直连", Protocol: "direct", Transport: tr, NodePath: path})
 	}
 	seen := make(map[string]bool)
 	add := func(nodes []map[string]any) error {
@@ -160,7 +184,7 @@ func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 				}
 			}
 
-			route, err := Build(node, len(routes))
+			route, err := Build(node, len(routes), path)
 			if err != nil {
 				return fmt.Errorf("node %d: %w", len(routes)+1, err)
 			}
@@ -196,6 +220,9 @@ func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 		}
 	}
 	download := baseTransport()
+	if path != nil {
+		download.DialContext = path.DialContext
+	}
 	defer download.CloseIdleConnections()
 	if c.SubscriptionProxyEnv != "" {
 		raw := os.Getenv(c.SubscriptionProxyEnv)

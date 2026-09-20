@@ -43,8 +43,8 @@ const help = `ccodex-sleep-state — 一个本地服务，管理 Codex 连接与
   --config PATH               使用指定 JSON 配置；init 会创建这个文件。
   --no-config                仅限 serve / setup：只启动服务，不接管 Codex 配置。
 
-主动探测使用你已有的 Codex 登录，会消耗实际额度。探测次数受限，
-遇到 401、403、429 停止本轮。日志不记录账号、订阅、正文和完整 token。
+主动探测使用你已有的 Codex 登录，会消耗实际额度。未成功时连续寻找，
+成功后暂停额外采集；遇到 401、403、429 暂停。日志不记录账号、订阅、正文和完整 token。
 第一次使用运行 setup，或双击 start.cmd（Windows）/ start.command（macOS）。
 启动本身不发送模型请求；Codex 接入后的探测可能消耗额度。
 退出请用 Ctrl+C，让程序有机会恢复配置。

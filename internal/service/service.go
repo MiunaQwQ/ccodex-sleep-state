@@ -21,6 +21,7 @@ import (
 	"github.com/gylive/ccodex-sleep-state/internal/logbook"
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
+	"github.com/gylive/ccodex-sleep-state/internal/turnstate"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -61,7 +62,11 @@ func run(parent context.Context, dir, configPath string, c settings.Config, conf
 	proxyroute.QuietCore()
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	ctl := &control{ctx: ctx, config: c, path: configPath, dir: dir, configure: configure, rescue: rescue, log: logger}
+	backup, err := turnstate.OpenBackup(filepath.Join(dir, "state-backup.json"))
+	if err != nil {
+		return err
+	}
+	ctl := &control{ctx: ctx, config: c, path: configPath, dir: dir, configure: configure, rescue: rescue, log: logger, backup: backup}
 
 	var routes []proxyroute.Route
 	if launchBrowser && configure && !rescue {

@@ -89,7 +89,10 @@ func ParseURI(raw string) (map[string]any, error) {
 		if scheme == "socks5h" {
 			kind = "socks5"
 		}
-		node := map[string]any{"name": "imported", "type": kind, "server": u.Hostname(), "port": port}
+		node := map[string]any{"__source_uri": raw, "name": "imported", "type": kind, "server": u.Hostname(), "port": port}
+		if u.Fragment != "" {
+			node["name"] = u.Fragment
+		}
 		if scheme == "https" {
 			node["tls"] = true
 		}
@@ -105,6 +108,7 @@ func ParseURI(raw string) (map[string]any, error) {
 	if err != nil || len(nodes) != 1 {
 		return nil, errors.New("unsupported proxy URI")
 	}
+	nodes[0]["__source_uri"] = raw
 	return nodes[0], nil
 }
 

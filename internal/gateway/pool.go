@@ -22,19 +22,29 @@ func (e *Engine) PoolStatus() []PoolRow {
 	return rows
 }
 func (e *Engine) selectEgress(harvest int, hasState bool) (int, error) {
-	if e.config.EgressMode == "fixed" {
+	if e.settings().EgressMode == "fixed" {
 		for i, r := range e.routes {
-			if r.ID == e.config.EgressRoute {
+			if r.ID == e.settings().EgressRoute {
 				state := e.pool.Get(r.ID).State
-				if state == "disabled" || (e.config.PoolEnabled && state == "failed") {
-					return 0, errors.New("固定出口已失败/停用，请在代理池手动回收或选择另一个出口")
+				if state == "failed" {
+					for offset := 1; offset < len(e.routes); offset++ {
+						next := (i + offset) % len(e.routes)
+						st := e.pool.Get(e.routes[next].ID).State
+						if st != "failed" && st != "disabled" {
+							return next, nil
+						}
+					}
+					return 0, errors.New("固定出口连接失败，且没有其它可用节点；请手动恢复或增加节点")
+				}
+				if state == "disabled" {
+					return 0, errors.New("固定出口已停用，请先取消停用或选择其它节点")
 				}
 				return i, nil
 			}
 		}
 		return 0, errors.New("固定出口不存在，请重新选择")
 	}
-	if e.config.EgressMode != "random" {
+	if e.settings().EgressMode != "random" {
 		if hasState {
 			return harvest, nil
 		}
@@ -46,7 +56,8 @@ func (e *Engine) selectEgress(harvest int, hasState bool) (int, error) {
 		if hasState && i == harvest {
 			continue
 		}
-		if st == "disabled" || (e.config.PoolEnabled && (st == "used" || st == "failed")) {
+
+		if st == "disabled" || st == "failed" || (e.settings().PoolEnabled && st == "used") {
 			continue
 		}
 		candidates = append(candidates, i)

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"github.com/gylive/ccodex-sleep-state/internal/gateway"
 	"net/http"
 	"sync"
 	"time"
@@ -9,6 +10,7 @@ import (
 // Request history deliberately contains no URL, prompt, credential or state.
 // It survives route reloads so an empty model session list never means no traffic.
 type requestEvent struct {
+	gateway.RequestOutcome
 	Kind       string    `json:"kind"`
 	Status     int       `json:"status"`
 	DurationMS int64     `json:"duration_ms"`
@@ -24,7 +26,7 @@ func (h *requestHistory) record(e requestEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.total++
-	if e.Status >= 400 {
+	if e.Status >= 400 || e.Result == "failed" {
 		h.failed++
 	}
 	if len(h.recent) == 30 {
@@ -78,7 +80,13 @@ func requestKind(path string) string {
 		return "远程压缩"
 	case "/backend-api/codex/models":
 		return "模型列表"
+	case "/backend-api/codex/images/generations":
+		return "图片生成"
+	case "/backend-api/codex/images/edits":
+		return "图片编辑"
+	case "/backend-api/codex/alpha/search":
+		return "搜索"
 	default:
-		return "其他"
+		return "其他接口"
 	}
 }

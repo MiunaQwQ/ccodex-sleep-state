@@ -146,14 +146,36 @@ func TestRejectionSurvivesModelSwitch(t *testing.T) {
 			for _, m := range settings.SupportedModels() {
 				w := httptest.NewRecorder()
 				e.ServeHTTP(w, request(strings.ReplaceAll(generation, settings.Model, m), "same-rejected-account"))
-				if w.Code != code {
+				if w.Code != 503 {
 					t.Fatalf("model=%s status=%d", m, w.Code)
 				}
 			}
-			if calls.Load() != 1 {
-				t.Fatalf("switched models retried rejected credentials %d times", calls.Load())
+			if calls.Load() != int32(len(settings.SupportedModels())) {
+				t.Fatalf("each model should have an isolated probe: %d", calls.Load())
 			}
 		})
+	}
+}
+
+func TestFailedFiveSixProbeDoesNotBlockAstraState(t *testing.T) {
+	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "gpt-5.6-sol") && r.Header.Get(turnstate.Header) == "" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		complete(w, fakeToken(10, 99))
+	}))
+	five := strings.ReplaceAll(generation, settings.Model, "gpt-5.6-sol")
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, request(five, "isolated-model-probe"))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed 5.6 probe should remain local, status=%d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	e.ServeHTTP(w, request(generation, "isolated-model-probe"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("5.6 probe polluted astra session, status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -162,12 +184,12 @@ func TestCompactionDoesNotDependOnCollection(t *testing.T) {
 	body := `{"model":"gpt-5.6-terra","input":[],"instructions":"compact"}`
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		if r.URL.Path != "/backend-api/codex/responses" {
-			t.Error("legacy bridge did not use V2 endpoint")
+		if r.URL.Path != "/backend-api/codex/responses/compact" {
+			t.Error("native compact endpoint was rewritten")
 		}
 		b, _ := io.ReadAll(r.Body)
-		if !remoteCompactionV2(b) {
-			t.Error("missing official compaction trigger")
+		if string(b) != body {
+			t.Error("native compact body was rewritten")
 		}
 		if r.Header.Get(turnstate.Header) != "client-owned-state" {
 			t.Error("compaction state header modified")
@@ -385,16 +407,17 @@ func TestStateFallbackNeverBypassesAccountRejection(t *testing.T) {
 			e.config.StateFallback = "passthrough"
 			w := httptest.NewRecorder()
 			e.ServeHTTP(w, request(generation, "fallback-rejected"))
-			if w.Code != code || calls.Load() != 1 {
-				t.Fatalf("status=%d calls=%d", w.Code, calls.Load())
+			if w.Code != code || calls.Load() != 2 {
+				t.Fatalf("formal request still reached upstream after probe: status=%d calls=%d", w.Code, calls.Load())
 			}
 		})
 	}
 }
 
-func TestManualRetryRespectsCooldownAndKeepsOpaqueSessionID(t *testing.T) {
+func TestFailedCollectionBackoffBlocksManualRetryAndKeepsOpaqueSessionID(t *testing.T) {
 	var calls atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); complete(w, fakeToken(11, 31)) }))
+	e.config.Collection.FailureIntervalSeconds = 0
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "manual-retry-token"))
 	var s *session
@@ -404,20 +427,21 @@ func TestManualRetryRespectsCooldownAndKeepsOpaqueSessionID(t *testing.T) {
 	if s == nil || s.id == "" {
 		t.Fatal("no opaque session id")
 	}
-	if err := e.RetryState(context.Background(), s.id); err == nil || !strings.Contains(err.Error(), "冷却") {
-		t.Fatalf("cooldown error=%v", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatal("manual retry skipped cooldown")
-	}
-	s.mu.Lock()
-	s.nextProbe = time.Now().Add(-time.Second)
-	s.mu.Unlock()
 	if err := e.RetryState(context.Background(), s.id); err == nil {
 		t.Fatal("bad state became accepted")
 	}
+	// Zero-start permits one immediate retry, then waits 30 seconds.
+	if err := e.RetryState(context.Background(), s.id); err == nil {
+		t.Fatal("manual retry ignored second-failure backoff")
+	}
 	if calls.Load() != 2 {
-		t.Fatalf("retry count=%d", calls.Load())
+		t.Fatal("manual retry bypassed failure backoff")
+	}
+	s.mu.Lock()
+	cooling := time.Now().Before(s.nextProbe)
+	s.mu.Unlock()
+	if !cooling {
+		t.Fatal("failed collection did not set failure backoff")
 	}
 	status, _ := json.Marshal(e.Status())
 	if !strings.Contains(string(status), `"id":"`+s.id+`"`) {
@@ -457,16 +481,16 @@ func TestManualRetryDoesNotClearReadyStateOrAccountLimits(t *testing.T) {
 	}
 }
 
-func TestManualRetryReportsBusyAndSuccess(t *testing.T) {
+func TestManualRetryRequiresActivationAndAllowsForeground(t *testing.T) {
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { complete(w, fakeToken(10, 33)) }))
 	s, err := e.borrow(request(generation, "manual-busy-token").Header)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = e.RetryState(context.Background(), s.id); err == nil || !strings.Contains(err.Error(), "处理请求") {
-		t.Fatalf("busy error=%v", err)
+	defer release(s)
+	if err = e.RetryState(context.Background(), s.id); err == nil || !strings.Contains(err.Error(), "尚未开始采集") {
+		t.Fatalf("activation error=%v", err)
 	}
-	release(s)
 	s.mu.Lock()
 	s.activated = true
 	s.mu.Unlock()
@@ -484,6 +508,7 @@ func TestManualRetryReportsBusyAndSuccess(t *testing.T) {
 
 func TestBackgroundSelectionPinsCredentialGuardAcrossIdleBoundary(t *testing.T) {
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("selection test must not send requests") }))
+	e.config.Collection.IdleSeconds = int(idleLifetime.Seconds())
 	headers := request(generation, "worker-pin-account").Header
 	s, err := e.borrow(headers)
 	if err != nil {
@@ -499,7 +524,7 @@ func TestBackgroundSelectionPinsCredentialGuardAcrossIdleBoundary(t *testing.T) 
 	if len(work) != 1 || work[0] != s {
 		t.Fatal("active worker session not selected")
 	}
-	defer release(s)
+	defer releaseWork(s)
 	// Selection used the instant immediately before expiration. By the time a
 	// new model borrows the same credentials, the idle boundary has passed.
 	other, err := e.borrow(headers, "gpt-5.6-sol")
@@ -538,14 +563,14 @@ func TestInjectionOffPreservesClientOwnedState(t *testing.T) {
 	}
 }
 
-func TestStateFallbackPreservesClientOwnedStateButProbeDoesNotUseIt(t *testing.T) {
+func TestManagedStateFallbackAndProbeDoNotReuseClientState(t *testing.T) {
 	var probes, generations atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if string(body) == generation {
 			generations.Add(1)
-			if r.Header.Get(turnstate.Header) != "client-fallback-state" {
-				t.Error("fallback changed client-owned state")
+			if r.Header.Get(turnstate.Header) != "" {
+				t.Error("managed fallback bypassed empty pool using client state")
 			}
 		} else {
 			probes.Add(1)

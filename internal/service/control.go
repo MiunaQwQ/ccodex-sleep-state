@@ -10,20 +10,26 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gylive/ccodex-sleep-state/internal/codexconfig"
 	"github.com/gylive/ccodex-sleep-state/internal/fsutil"
 	"github.com/gylive/ccodex-sleep-state/internal/gateway"
+	"github.com/gylive/ccodex-sleep-state/internal/netpath"
 	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 	"github.com/gylive/ccodex-sleep-state/internal/routepool"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
+	"github.com/gylive/ccodex-sleep-state/internal/turnstate"
 )
 
 // control owns a whole route generation. Reconfiguration never mutates routes
 // under an active request, and never discards an account's upstream rejection.
 type control struct {
+	activeRequests        atomic.Int64
+	collection            *gateway.CollectionBudget
 	pool                  *routepool.Store
+	backup                *turnstate.BackupStore
 	targetURL, targetKind string
 	authMode, codexHome   string
 
@@ -35,6 +41,9 @@ type control struct {
 	configure, managed     bool
 	rescue                 bool
 	setupError, routeError string
+	tests                  *nodeTester
+	catalog                []map[string]any
+	nodePath               *netpath.Path
 	engine                 *gateway.Engine
 	cancel                 context.CancelFunc
 	done                   chan struct{}
@@ -43,6 +52,15 @@ type control struct {
 }
 
 func (c *control) start(routes []proxyroute.Route) {
+	if c.collection == nil {
+		var err error
+		c.collection, err = gateway.OpenCollectionBudget(filepath.Join(c.dir, "collection-budget.json"))
+		if err != nil {
+			closeRoutes(routes)
+			c.routeError = err.Error()
+			return
+		}
+	}
 	if c.pool == nil {
 		var err error
 		c.pool, err = routepool.Open(filepath.Join(c.dir, "pool-state.json"))
@@ -52,26 +70,46 @@ func (c *control) start(routes []proxyroute.Route) {
 			return
 		}
 	}
-
-	selected := routes
-	if c.config.PinnedRoute != "" {
-		selected = nil
-		for _, r := range routes {
-			if r.ID == c.config.PinnedRoute {
-				selected = append(selected, r)
-			} else {
-				r.Close()
-			}
+	if c.tests == nil {
+		c.tests = &nodeTester{}
+	}
+	c.catalog = routeList(routes)
+	c.nodePath = nil
+	if len(routes) > 0 {
+		c.nodePath = routes[0].NodePath
+	}
+	selected := make([]proxyroute.Route, 0, len(routes))
+	for _, route := range routes {
+		if routeCandidateSelected(c.config, route.ID) {
+			selected = append(selected, route)
+		} else {
+			route.Close()
 		}
 	}
+	if c.config.PinnedRoute == "" && len(c.config.SelectedRoutes) > 0 {
+		ordered := make([]proxyroute.Route, 0, len(selected))
+		byID := map[string]proxyroute.Route{}
+		for _, route := range selected {
+			byID[route.ID] = route
+		}
+		for _, id := range c.config.SelectedRoutes {
+			if route, ok := byID[id]; ok {
+				ordered = append(ordered, route)
+				delete(byID, id)
+			}
+		}
+		selected = ordered
+	}
 	if len(selected) == 0 {
-		c.routeError = "固定出口已不存在，请在路由页切回自动选择。"
+		c.routeError = "所选出口已不存在，请在节点池重新选择节点。"
 		return
 	}
 	ctx, cancel := context.WithCancel(c.ctx)
 	c.cancel, c.done = cancel, make(chan struct{})
 	effective := c.effective()
 	c.engine = gateway.New(effective, selected, c.log, c.pool)
+	c.engine.SetStateBackup(c.backup)
+	c.engine.SetCollectionBudget(c.collection)
 	engine, done := c.engine, c.done
 	go func() { defer close(done); engine.Run(ctx) }()
 	c.routeError = ""
@@ -95,6 +133,9 @@ func (c *control) resume() {
 	go func() { defer close(done); engine.Run(ctx) }()
 }
 func (c *control) stop() {
+	if c.tests != nil {
+		c.tests.stop()
+	}
 	c.pause()
 	if c.engine != nil {
 		c.engine.Close()
@@ -181,16 +222,27 @@ func (c *control) checkManaged() error {
 func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	observed := &observedResponse{ResponseWriter: w}
 	started := time.Now()
+	outcome := &gateway.RequestOutcome{}
+	r = gateway.WithOutcome(r, outcome)
 	defer func() {
 		status := observed.status
 		if status == 0 {
 			status = 200
 		}
-		c.history.record(requestEvent{Kind: requestKind(r.URL.Path), Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC()})
+		kind := requestKind(r.URL.Path)
+		if outcome.Kind == "compact" {
+			kind = "远程压缩"
+		}
+		c.history.record(requestEvent{Kind: kind, Status: status, DurationMS: time.Since(started).Milliseconds(), At: time.Now().UTC(), RequestOutcome: *outcome})
 	}()
 	w = observed
 	c.mu.RLock()
-	defer c.mu.RUnlock()
+	locked := true
+	defer func() {
+		if locked {
+			c.mu.RUnlock()
+		}
+	}()
 	if c.managed {
 		if err := c.checkManaged(); err != nil {
 			reply(w, 409, map[string]string{"error": "codex_config_changed", "message": "Codex 配置已被 CCS 或其他程序修改。请打开管理面板，点击「检查与修复配置」；确认当前选择后重新接管并重启 Codex。不会覆盖你的改动。"})
@@ -219,7 +271,12 @@ func (c *control) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	c.engine.ServeHTTP(w, r)
+	engine := c.engine
+	c.activeRequests.Add(1)
+	c.mu.RUnlock()
+	locked = false
+	defer c.activeRequests.Add(-1)
+	engine.ServeHTTP(w, r)
 }
 func (c *control) status() map[string]any {
 	c.mu.RLock()
@@ -244,12 +301,21 @@ func (c *control) status() map[string]any {
 	result["state_fallback"] = c.config.StateFallback
 	result["state_refresh_mode"] = c.config.StateRefreshMode
 	result["advanced"] = advancedFrom(c.config)
+	result["node_network"] = netpath.Info{Mode: "system"}
+	if c.nodePath != nil {
+		result["node_network"] = c.nodePath.Info
+	} else if c.config.NodeNetworkMode == "physical" {
+		result["node_network"] = netpath.Info{Mode: "physical", Interface: c.config.NodeInterface}
+	}
 	if c.pool != nil && c.pool.Err() != nil {
 		result["pool_error"] = c.pool.Err().Error()
 	}
 	result["timing"] = timingFrom(c.config)
 	result["timing_defaults"] = timingFrom(settings.Default())
 	result["traffic"] = c.history.snapshot()
+	if c.tests != nil {
+		result["node_tests"] = c.tests.snapshot()
+	}
 	result["injection_effective"] = !c.effective().InjectionDisabled && c.engine != nil && result["configured_codex"] == true && result["config_error"] == "" && c.routeError == ""
 	if c.effective().IsRelay() {
 		result["injection_reason"] = "当前为 API / 中转转发，不采集或注入官方 state。"

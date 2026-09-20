@@ -38,6 +38,7 @@ func testEngine(t *testing.T, handler http.Handler) (*Engine, *bytes.Buffer) {
 	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 	c := settings.Default()
+	c.Collection.Cadence = "backoff"
 	c.Upstream = upstream.URL + "/backend-api/codex"
 	c.ProbeSeconds = 3
 	logs := new(bytes.Buffer)
@@ -121,17 +122,17 @@ func TestQuotaFailureStopsProbeRoundAndCooldown(t *testing.T) {
 			for i := 0; i < 2; i++ {
 				w := httptest.NewRecorder()
 				e.ServeHTTP(w, request(generation, "synthetic-account-token"))
-				if w.Code != status {
-					t.Fatalf("status=%d", w.Code)
+				if w.Code != 503 {
+					t.Fatalf("probe failure must stay local: status=%d", w.Code)
 				}
 			}
 			if calls.Load() != 1 {
-				t.Fatalf("quota/auth rejection retried %d times", calls.Load())
+				t.Fatalf("probe failure retried %d times", calls.Load())
 			}
 		})
 	}
 }
-func TestShapeRejectionNeverReplaysGeneration(t *testing.T) {
+func TestShapeChangePreservesAnswerAndNeverReplaysGeneration(t *testing.T) {
 	var generated atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(turnstate.Header) == "" {
@@ -143,7 +144,7 @@ func TestShapeRejectionNeverReplaysGeneration(t *testing.T) {
 	}))
 	w := httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "synthetic-account-token"))
-	if w.Code != 503 || generated.Load() != 1 || !strings.Contains(w.Body.String(), "state_shape_changed") {
+	if w.Code != 200 || generated.Load() != 1 || !strings.Contains(w.Body.String(), "response.completed") {
 		t.Fatal("shape policy or no-replay guarantee failed")
 	}
 }
@@ -188,7 +189,7 @@ func TestUnsupportedRequestsDoNotReachUpstream(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	req = request(generation, "synthetic-account-token")
-	req.URL.Path = "/backend-api/codex/not-supported"
+	req.URL.Path = "/outside-provider/not-supported"
 	w = httptest.NewRecorder()
 	e.ServeHTTP(w, req)
 	if w.Code != 404 {
@@ -346,14 +347,19 @@ func TestDifferentProbeShapeIsExplainedNotSilentlyAccepted(t *testing.T) {
 		t.Fatal("unexpected shape must not reach generation")
 	}
 	var event struct {
+		Message        string `json:"msg"`
 		Result         string `json:"result"`
 		StateBlocks    int    `json:"state_blocks"`
 		ExpectedBlocks int    `json:"expected_blocks"`
 	}
-	if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &event); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(logs.Bytes()))
+	if err := decoder.Decode(&event); err != nil || event.Message != "probe_started" {
+		t.Fatalf("missing dispatch log: %v %+v", err, event)
+	}
+	if err := decoder.Decode(&event); err != nil {
 		t.Fatal(err)
 	}
-	if event.Result != "shape_mismatch" || event.StateBlocks != 11 || event.ExpectedBlocks != 10 {
+	if event.Message != "probe_finished" || event.Result != "shape_mismatch" || event.StateBlocks != 11 || event.ExpectedBlocks != 10 {
 		t.Fatalf("missing diagnostic: %+v", event)
 	}
 	if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), "synthetic-account-token") {
@@ -435,7 +441,7 @@ func TestGenerationRejectionPausesRequestsAndProbes(t *testing.T) {
 	}
 }
 
-func TestDefaultBaselineSkipsMismatchedRouteAndBindsGoodRoute(t *testing.T) {
+func TestBackoffSkipsMismatchedRouteAndBindsGoodRoute(t *testing.T) {
 	var badCalls, goodCalls atomic.Int32
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		badCalls.Add(1)
@@ -458,7 +464,26 @@ func TestDefaultBaselineSkipsMismatchedRouteAndBindsGoodRoute(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, network, strings.TrimPrefix(good.URL, "http://"))
 	}}
 	e.routes = append(e.routes, proxyroute.Route{ID: "good-route", Transport: tr})
+	s, _ := e.borrow(request(generation, "synthetic-account-token").Header)
+	setTestProbeOrder(e, s, 0, 1)
+	release(s)
 	w := httptest.NewRecorder()
+	e.ServeHTTP(w, request(generation, "synthetic-account-token"))
+	if w.Code != 503 || badCalls.Load() != 1 || goodCalls.Load() != 0 {
+		t.Fatal("first failure must wait before next egress")
+	}
+	for _, s := range e.sessions {
+		// Advance the persisted backoff gate without sleeping in the transport test.
+		e.collection.mu.Lock()
+		entry := e.collection.doc.Searches[s.backupKey]
+		entry.Until = time.Now().Add(-time.Second)
+		entry.LastAttemptAt = time.Now().Add(-time.Minute)
+		entry.LastFailureAt = entry.LastAttemptAt
+		e.collection.doc.Searches[s.backupKey] = entry
+		e.collection.mu.Unlock()
+		s.nextProbe = time.Time{}
+	}
+	w = httptest.NewRecorder()
 	e.ServeHTTP(w, request(generation, "synthetic-account-token"))
 	if w.Code != 200 || badCalls.Load() != 1 || goodCalls.Load() != 2 {
 		t.Fatalf("wrong selection: status=%d bad=%d good=%d", w.Code, badCalls.Load(), goodCalls.Load())

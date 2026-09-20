@@ -97,13 +97,12 @@ func TestLegacyPinClearsIndependentExit(t *testing.T) {
 func TestSimplePoolImportActivatesExplicitPreset(t *testing.T) {
 	c := &control{config: settings.Default()}
 	next, err := c.candidate(sourceRequest{Mode: "subscription-list", Value: "https://fixture.invalid/sub", Append: true, EnablePool: true})
-	if err != nil || !next.PoolEnabled || next.EgressMode != "random" {
+	if err != nil || !next.PoolEnabled || next.EgressMode != "state" {
 		t.Fatal(next, err)
 	}
-	c.config.EgressMode = "fixed"
-	c.config.EgressRoute = "fixed-id"
+	c.config.PinnedRoute = "fixed-id"
 	next, err = c.candidate(sourceRequest{Mode: "subscription-list", Value: "https://fixture.invalid/sub", Append: true, EnablePool: true})
-	if err != nil || next.EgressMode != "fixed" || next.EgressRoute != "fixed-id" {
+	if err != nil || next.EgressMode != "state" || next.PinnedRoute != "fixed-id" {
 		t.Fatal(next, err)
 	}
 }

@@ -64,6 +64,17 @@ func (s *Store) Change(ids []string, state, reason string, attempt bool) error {
 	defer s.mu.Unlock()
 	return s.changeLocked(ids, state, reason, attempt)
 }
+
+// A late successful probe cannot re-enable an exit failed or disabled while
+// the probe was in flight. Only an explicit manual Change may restore it.
+func (s *Store) FinishProbe(id, state, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if old := s.entries[id]; old.State == "failed" || old.State == "disabled" {
+		return s.err
+	}
+	return s.changeLocked([]string{id}, state, reason, false)
+}
 func (s *Store) changeLocked(ids []string, state, reason string, attempt bool) error {
 	if state != "available" && state != "used" && state != "failed" && state != "disabled" {
 		return errors.New("无效代理池操作")
@@ -125,4 +136,19 @@ func (s *Store) ClaimProbe(id string, manual bool) error {
 		return errors.New("节点已被使用或停用，请刷新清单")
 	}
 	return s.changeLocked([]string{id}, "used", "probe_started", true)
+}
+
+// Restore only the exact failed record the user asked to retest. A newer
+// disable/failure decision must not be overwritten by a late successful test.
+func (s *Store) RecoverTested(id string, updated time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.entries[id]
+	if updated.IsZero() || old.State != "failed" || !old.Updated.Equal(updated) {
+		return false, nil
+	}
+	if err := s.changeLocked([]string{id}, "available", "manual_test_passed", false); err != nil {
+		return false, err
+	}
+	return true, nil
 }

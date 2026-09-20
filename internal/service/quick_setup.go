@@ -45,8 +45,8 @@ func (c *control) quickSetupMode(ctx context.Context, chooseFallback bool) error
 	if chooseFallback || next.StateFallback == "" {
 		next.StateFallback = "passthrough"
 	}
-	if next.Direct && len(next.ProxyURLs) == 0 && len(next.ProxyEnvs) == 0 && len(next.Subscriptions) == 0 && next.PinnedRoute == "" {
-		proxy, err := discoverLocalSOCKS(ctx, []string{"127.0.0.1:7897", "127.0.0.1:7890", "127.0.0.1:10808"}, (&net.Dialer{}).DialContext)
+	if next.NodeNetworkMode != "physical" && next.Direct && len(next.ProxyURLs) == 0 && len(next.ProxyEnvs) == 0 && len(next.Subscriptions) == 0 && next.PinnedRoute == "" {
+		proxy, err := discoverLocalSOCKS(ctx, []string{"127.0.0.1:1082", "127.0.0.1:7897", "127.0.0.1:7890", "127.0.0.1:10808"}, (&net.Dialer{}).DialContext)
 		if err != nil {
 			return err
 		}

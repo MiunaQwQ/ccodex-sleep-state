@@ -47,5 +47,5 @@ func Parse(value string) (Token, error) {
 }
 
 func (p Policy) Accept(t Token, now time.Time) bool {
-	return t.Value != "" && t.Blocks == p.Blocks && !t.Issued.After(now.Add(30*time.Second)) && now.Before(t.Issued.Add(p.TTL-30*time.Second))
+	return t.Value != "" && (p.Blocks <= 0 || t.Blocks == p.Blocks) && !t.Issued.After(now.Add(30*time.Second)) && now.Before(t.Issued.Add(p.TTL-30*time.Second))
 }

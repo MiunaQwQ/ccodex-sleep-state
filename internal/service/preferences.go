@@ -10,15 +10,16 @@ import (
 )
 
 type timingPreferences struct {
-	ProbeSeconds    int `json:"probe_timeout_seconds"`
-	RefreshSeconds  int `json:"refresh_before_seconds"`
-	CooldownSeconds int `json:"probe_cooldown_seconds"`
-	MaxProbes       int `json:"max_probes_per_round"`
-	TTLSeconds      int `json:"state_ttl_seconds"`
+	Collection      *settings.CollectionPolicy `json:"collection,omitempty"`
+	ProbeSeconds    int                        `json:"probe_timeout_seconds"`
+	RefreshSeconds  int                        `json:"refresh_before_seconds"`
+	CooldownSeconds int                        `json:"probe_cooldown_seconds"`
+	MaxProbes       int                        `json:"max_probes_per_round"`
+	TTLSeconds      int                        `json:"state_ttl_seconds"`
 }
 
 func timingFrom(c settings.Config) timingPreferences {
-	return timingPreferences{c.ProbeSeconds, c.RefreshSeconds, c.CooldownSeconds, c.MaxProbes, c.TTLSeconds}
+	return timingPreferences{&c.Collection, c.ProbeSeconds, c.RefreshSeconds, c.CooldownSeconds, c.MaxProbes, c.TTLSeconds}
 }
 
 // applyPreferences runs under the management lock, after active replies drain.
@@ -30,6 +31,9 @@ func (c *control) applyPreferences(ctx context.Context, model, accountMode, fall
 		t := timing[0]
 		next.ProbeSeconds, next.RefreshSeconds, next.CooldownSeconds = t.ProbeSeconds, t.RefreshSeconds, t.CooldownSeconds
 		next.MaxProbes, next.TTLSeconds = t.MaxProbes, t.TTLSeconds
+		if t.Collection != nil {
+			next.Collection = *t.Collection
+		}
 	}
 	return c.applyConfig(ctx, next)
 }
@@ -50,6 +54,10 @@ func (c *control) applyConfig(ctx context.Context, next settings.Config) error {
 	}
 	routes, err := proxyroute.Load(ctx, next)
 	if err != nil {
+		return err
+	}
+	if err = validateSelection(routes, next); err != nil {
+		closeRoutes(routes)
 		return err
 	}
 	published := false
@@ -122,5 +130,49 @@ func (c *control) applyConfig(ctx context.Context, next settings.Config) error {
 	}
 	c.start(routes)
 	published = true
+	return nil
+}
+
+func (c *control) applyTiming(t timingPreferences) error {
+	if c.managed {
+		if err := c.checkManaged(); err != nil {
+			return errors.New("Codex 连接已改变，请先检查与修复配置")
+		}
+	}
+	if c.engine != nil && c.engine.Restricted() {
+		return errors.New("上游拒绝或限流仍未解除，采集时间暂不修改")
+	}
+	for _, id := range []string{c.config.PinnedRoute, c.config.EgressRoute} {
+		if id == "" {
+			continue
+		}
+		found := false
+		for _, row := range c.catalog {
+			if row["id"] == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("固定出口已不在当前节点清单中，设置未保存")
+		}
+	}
+
+	next := c.config
+	next.ProbeSeconds, next.RefreshSeconds, next.CooldownSeconds = t.ProbeSeconds, t.RefreshSeconds, t.CooldownSeconds
+	next.MaxProbes, next.TTLSeconds = t.MaxProbes, t.TTLSeconds
+	if t.Collection != nil {
+		next.Collection = *t.Collection
+	}
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	if err := c.persist(next); err != nil {
+		return err
+	}
+	c.config = next
+	if c.engine != nil {
+		c.engine.UpdateTiming(next)
+	}
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
@@ -38,11 +39,11 @@ func TestTimingPreferencesPersistAndPreserveOtherSettings(t *testing.T) {
 		t.Fatal("missing backup", backups, err)
 	}
 	backup, err := settings.Load(backups[0])
-	if err != nil || timingFrom(backup) != timingFrom(before) {
+	if err != nil || !reflect.DeepEqual(timingFrom(backup), timingFrom(before)) {
 		t.Fatal("backup incorrect", err)
 	}
 	status := c.status()
-	if status["timing"] != timingFrom(want) || status["timing_defaults"] != timingFrom(settings.Default()) {
+	if !reflect.DeepEqual(status["timing"], timingFrom(want)) || !reflect.DeepEqual(status["timing_defaults"], timingFrom(settings.Default())) {
 		t.Fatal("status missing timing", status)
 	}
 }

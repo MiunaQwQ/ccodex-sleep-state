@@ -41,13 +41,20 @@ type sourceRequest struct {
 }
 
 func (c *control) candidate(v sourceRequest) (settings.Config, error) {
+	var err error
+	v, err = normalizeSource(v)
+	if err != nil {
+		return c.config, err
+	}
 	next := c.config
+	next.Direct = false
 	if !v.Append {
 		next.Direct = false
 		next.ProxyURLs = []string{}
 		next.ProxyEnvs = []string{}
 		next.Subscriptions = []settings.Source{}
 		next.PinnedRoute = ""
+		next.SelectedRoutes = nil
 		next.EgressRoute = ""
 		if next.EgressMode == "fixed" {
 			next.EgressMode = "random"
@@ -57,20 +64,56 @@ func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 	next.ProxyURLs = append([]string(nil), next.ProxyURLs...)
 	if v.EnablePool {
 		next.PoolEnabled = true
-		next.PinnedRoute = ""
-		if next.EgressMode != "fixed" {
-			next.EgressMode = "random"
-		}
+		next.EgressMode = "state"
 	}
 	source := settings.Source{UserAgent: v.UserAgent, ExcludeKeywords: v.Exclude, IncludeProtocols: v.Protocols}
 	switch v.Mode {
+	case "mixed":
+		for _, raw := range strings.Split(v.Value, "\n") {
+			raw = strings.TrimSpace(raw)
+			if raw == "" || strings.HasPrefix(raw, "#") {
+				continue
+			}
+			if isSubscriptionSource(raw) {
+				entry := source
+				entry.URL = raw
+				next.Subscriptions = appendSource(next.Subscriptions, entry)
+			} else {
+				found := false
+				for _, old := range next.ProxyURLs {
+					if old == raw {
+						found = true
+					}
+				}
+				if !found {
+					next.ProxyURLs = append(next.ProxyURLs, raw)
+				}
+			}
+		}
+		if len(next.ProxyURLs) == 0 && len(next.Subscriptions) == 0 {
+			return next, errors.New("导入内容为空")
+		}
 	case "direct":
 		next.Direct = true
 	case "proxy":
-		next.ProxyURLs = append(next.ProxyURLs, v.Value)
+		for _, raw := range strings.Split(v.Value, "\n") {
+			raw = strings.TrimSpace(raw)
+			if raw != "" {
+				found := false
+				for _, old := range next.ProxyURLs {
+					found = found || old == raw
+				}
+				if !found {
+					next.ProxyURLs = append(next.ProxyURLs, raw)
+				}
+			}
+		}
+		if len(next.ProxyURLs) == 0 {
+			return next, errors.New("请填写至少一个节点链接")
+		}
 	case "subscription":
 		source.URL = v.Value
-		next.Subscriptions = append(next.Subscriptions, source)
+		next.Subscriptions = appendSource(next.Subscriptions, source)
 	case "subscription-list":
 		seen := map[string]bool{}
 		for _, existing := range next.Subscriptions {
@@ -95,7 +138,7 @@ func (c *control) candidate(v sourceRequest) (settings.Config, error) {
 		}
 	case "file":
 		source.File = v.Value
-		next.Subscriptions = append(next.Subscriptions, source)
+		next.Subscriptions = appendSource(next.Subscriptions, source)
 	default:
 		return next, errors.New("请选择直连、本地代理、订阅链接或本地订阅文件")
 	}
@@ -109,12 +152,26 @@ func closeRoutes(routes []proxyroute.Route) {
 func routeList(routes []proxyroute.Route) []map[string]any {
 	result := make([]map[string]any, 0, len(routes))
 	for _, r := range routes {
-		result = append(result, map[string]any{"id": r.ID, "label": r.DisplayName, "protocol": r.Protocol})
+		result = append(result, map[string]any{"id": r.ID, "label": r.DisplayName, "protocol": r.Protocol, "connection": r.Connection})
 	}
 	return result
 }
 
 func (c *control) api(w http.ResponseWriter, r *http.Request) {
+	// The lifecycle list is a snapshot, including the legacy POST used by older panels.
+	if (r.URL.Path == "/admin/api/pool/status" && r.Method == "GET") ||
+		(r.URL.Path == "/admin/api/pool" && r.Method == "POST") {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		c.poolAPI(w, r, r.Context())
+		return
+	}
+	if r.URL.Path == "/admin/api/pool" && r.Method == "GET" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		reply(w, 200, c.poolStatus())
+		return
+	}
 	if r.URL.Path == "/admin/api/environment-check" && r.Method == "GET" {
 		reply(w, 200, c.environmentCheck())
 		return
@@ -127,20 +184,65 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		reply(w, 405, map[string]string{"error": "此操作需要 POST"})
 		return
 	}
+	if r.URL.Path == "/admin/api/nodes/resume" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		var v struct {
+			SessionID string `json:"session_id"`
+			RouteID   string `json:"route_id"`
+		}
+		if err := decode(w, r, &v); err != nil {
+			reply(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if c.engine == nil {
+			reply(w, 409, map[string]string{"error": "服务尚未准备好"})
+			return
+		}
+		if err := c.engine.ResumeNode(v.SessionID, v.RouteID); err != nil {
+			reply(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		reply(w, 200, map[string]string{"message": "已手动恢复节点并解除该模型下的暂停；当前对话、轮间等待和采集预算保持不变。"})
+		return
+	}
+	if r.URL.Path == "/admin/api/pool/test" || r.URL.Path == "/admin/api/pool/test-stop" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		if c.tests == nil {
+			reply(w, 409, map[string]string{"error": "节点池尚未准备好"})
+			return
+		}
+		c.nodeTestAction(w, r)
+		return
+	}
 	// One management operation at a time. Never queue a chain of test requests.
 	if !c.action.TryLock() {
 		reply(w, 409, map[string]string{"error": "另一个管理操作还没完成，请稍后再试"})
 		return
 	}
 	defer c.action.Unlock()
+	if r.URL.Path == "/admin/api/state/retry" {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		c.retryStateAction(w, r)
+		return
+	}
 	if !c.mu.TryLock() {
-		reply(w, 409, map[string]string{"error": "Codex 正在处理请求，等这次回复结束后再操作"})
+		reply(w, 409, map[string]string{"error": "此操作会重建连接或修改配置，请等当前 AI 请求结束后再保存；节点状态、刷新和延迟测试仍可使用"})
 		return
 	}
 	defer c.mu.Unlock()
+	if c.activeRequests.Load() > 0 && r.URL.Path != "/admin/api/timing" && r.URL.Path != "/admin/api/state-policy" && r.URL.Path != "/admin/api/pool/change" {
+		reply(w, 409, map[string]string{"error": "当前有 AI 请求，连接变更需等待；采集时间、节点状态和测试可随时操作"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
+	if c.poolAction(w, r, ctx) {
+		return
+	}
 	switch r.URL.Path {
 	case "/admin/api/advanced", "/admin/api/pool", "/admin/api/pool/change":
 		c.poolAPI(w, r, ctx)
@@ -220,34 +322,6 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(w, 200, map[string]string{"message": "本机配置已备份并接入，尚未验证外网或模型。请重启 Codex 并发一条消息；采不到合格 state 时先普通转发。"})
-	case "/admin/api/state/retry":
-		var v struct {
-			ID      string `json:"id"`
-			RouteID string `json:"route_id,omitempty"`
-		}
-		if err := decode(w, r, &v); err != nil {
-			fail(err)
-			return
-		}
-		if c.rescue || c.engine == nil || c.setupError != "" || c.routeError != "" {
-			fail(errors.New("服务尚未接入，请先处理配置或出口问题"))
-			return
-		}
-		if err := c.checkManaged(); err != nil {
-			fail(errors.New("Codex 配置已改变，请先检查与修复配置"))
-			return
-		}
-		var err error
-		if v.RouteID != "" {
-			err = c.engine.RetryState(ctx, v.ID, v.RouteID)
-		} else {
-			err = c.engine.RetryState(ctx, v.ID)
-		}
-		if err != nil {
-			fail(err)
-			return
-		}
-		reply(w, 200, map[string]string{"message": "本轮采集已完成。请查看会话里的实际长度和结果；采不到时不会自动重复消耗额度。"})
 	case "/admin/api/codex-config/preview":
 		value, err := c.cleanPreview()
 		if err != nil {
@@ -382,11 +456,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("请先修复服务配置，再保存采集时间"))
 			return
 		}
-		if err := c.applyPreferences(ctx, c.config.Model, c.config.AccountMode, c.config.StateFallback, v); err != nil {
+		if err := c.applyTiming(v); err != nil {
 			fail(err)
 			return
 		}
-		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。旧 state 缓存已清空；后续请求可能重新采集并消耗额度。上游限流不会被重置。"})
+		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。没有重建节点或清空会话；新有效期或上限可能淘汰旧牌。采集预算和上游限流不会被重置。"})
 	case "/admin/api/preferences":
 		var v struct {
 			Model         string `json:"model"`
@@ -450,7 +524,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.URL.Path == "/admin/api/sources/test" {
 			defer closeRoutes(routes)
-			reply(w, 200, map[string]any{"message": "订阅获取、解析和出站配置构建通过。尚未连接出口，也没有发送模型请求。", "routes": routeList(routes)})
+			reply(w, 200, map[string]any{"message": "订阅获取、解析和出站配置构建通过。尚未连接出口，也没有发送模型请求。", "routes": routeList(routes), "diff": importDiff(c.catalog, routes), "exclude_keywords": v.Exclude})
 			return
 		}
 		// Appending sources can still remove a previously selected node when a
@@ -479,6 +553,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			reply(w, 409, map[string]string{"error": "上游登录、权限或限流拦截尚未解除。不能通过换出口继续请求。"})
 			return
 		}
+		if err = validateSelection(routes, next); err != nil {
+			closeRoutes(routes)
+			fail(err)
+			return
+		}
 		if err = c.persist(next); err != nil {
 			closeRoutes(routes)
 			fail(err)
@@ -491,7 +570,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("配置已保存，但固定出口已失效。请在路由页恢复自动选择。"))
 			return
 		}
-		reply(w, 200, map[string]string{"message": "出口已应用，不需要重启服务。旧 state 已清空，下次 Codex 请求会按新出口重新采集。"})
+		reply(w, 200, map[string]string{"message": "节点来源已保存。请到节点池勾选候选节点；下次模型请求将按新出口采集。"})
 	case "/admin/api/routes", "/admin/api/routes/test", "/admin/api/routes/pin":
 		var v struct {
 			ID string `json:"id"`
@@ -551,6 +630,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		// This legacy action pins the whole route set. Mixing it with an
 		// independent random/fixed exit would leave no matching candidate.
 		next.EgressMode, next.EgressRoute = "state", ""
+		if err = validateSelection(routes, next); err != nil {
+			closeRoutes(routes)
+			fail(err)
+			return
+		}
 		if err = c.persist(next); err != nil {
 			closeRoutes(routes)
 			fail(err)
@@ -563,7 +647,11 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			fail(errors.New("配置已保存，但固定出口已失效。请在路由页恢复自动选择。"))
 			return
 		}
-		reply(w, 200, map[string]string{"message": "路由已切换为采集同出口模式，旧 state 已清空。要分开采集与正式出口，请使用连接设置里的独立出口设置。"})
+		if v.ID == "" {
+			reply(w, 200, map[string]string{"message": "已取消固定。后续从已勾选代理池自动轮换；仍有效且属于现有节点的 state 备份会继续可用。"})
+		} else {
+			reply(w, 200, map[string]string{"message": "已固定该节点。采集、正式请求和失效后的 state 切换都只使用这个节点；其它节点不会自动顶上。"})
+		}
 	case "/admin/api/recover":
 		if !c.configure {
 			fail(errors.New("当前使用 --no-config 只读启动。请停止服务后使用 setup 启动，再接管配置；本次没有修改任何文件。"))
@@ -597,4 +685,42 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(w, 404, map[string]string{"error": "没有这个管理接口"})
 	}
+}
+
+// Manual collection may wait on the network, but does not replace the engine.
+// Keep snapshots and independent latency tests available while it runs.
+func (c *control) retryStateAction(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	fail := func(err error) { reply(w, 400, map[string]string{"error": err.Error()}) }
+	var v struct {
+		ID         string `json:"id"`
+		RouteID    string `json:"route_id,omitempty"`
+		RandomOnce bool   `json:"random_once,omitempty"`
+	}
+	if err := decode(w, r, &v); err != nil {
+		fail(err)
+		return
+	}
+	if c.rescue || c.engine == nil || c.setupError != "" || c.routeError != "" {
+		fail(errors.New("服务尚未接入，请先处理配置或出口问题"))
+		return
+	}
+	if err := c.checkManaged(); err != nil {
+		fail(errors.New("Codex 配置已改变，请先检查与修复配置"))
+		return
+	}
+	var err error
+	if v.RandomOnce {
+		err = c.engine.RetryRandomState(ctx, v.ID)
+	} else if v.RouteID != "" {
+		err = c.engine.RetryState(ctx, v.ID, v.RouteID)
+	} else {
+		err = c.engine.RetryState(ctx, v.ID)
+	}
+	if err != nil {
+		fail(err)
+		return
+	}
+	reply(w, 200, map[string]string{"message": "本轮采集已完成。请查看会话里的实际长度和结果；采不到时不会自动重复消耗额度。"})
 }
