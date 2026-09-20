@@ -3,7 +3,7 @@
 应用本身是 Go，发布包运行时不用装编译器。开发需要 Go 和 Git；代理核心带来较多依赖，第一次下载和编译会比之后慢。
 
 ```sh
-git clone https://github.com/gylive/ccodex-sleep-state.git
+git clone https://github.com/NanSsye/ccodex-sleep-state.git
 cd ccodex-sleep-state
 go test ./...
 go build -trimpath -o ccodex-sleep-state ./cmd/ccodex-sleep-state
@@ -64,4 +64,6 @@ CI 在 Windows、macOS 和 Linux 上跑测试与 `go vet`。发布工作流额�
 
 ## 干净发布包
 
-运行 `VERSION=state-pool-20260920-r16 bash scripts/build-release.sh` 构建 macOS Apple Silicon / Intel 与 Windows x64 / ARM64。构建只读取当前提交的临时源码副本，程序包只包含二进制、启动脚本、教程、更新记录、许可证和 `SOURCE_COMMIT`。工作区未跟踪或忽略的节点、订阅、配置、口令、state、日志及运行目录不会参与打包。源码包另附锁定依赖，`SHA256SUMS` 用于验证下载。首次启动由使用者在自己电脑上生成配置并添加来源。
+运行 `VERSION=r18 bash scripts/build-release.sh` 构建 macOS Apple Silicon / Intel 与 Windows x64 / ARM64。构建只读取当前提交的临时源码副本，程序包只包含二进制、启动脚本、教程、更新记录、许可证和 `SOURCE_COMMIT`。工作区未跟踪或忽略的节点、订阅、配置、口令、state、日志及运行目录不会参与打包。源码包另附锁定依赖，`ccodex-sleep-state-r18-SHA256SUMS.txt` 用于验证下载。首次启动由使用者在自己电脑上生成配置并添加来源。
+
+版本包文件名为 `ccodex-sleep-state-<版本>-<平台>-<架构>`，源码和校验文件也带版本。发布前必须提交对应的 `docs/release-<版本>.md`，构建会将其复制为包内 `RELEASE_NOTES.md` 并用于 Release 正文；缺少说明时构建拒绝发布。包内另附 `VERSION` 和 `SOURCE_COMMIT`。

@@ -36,7 +36,7 @@
 
 ## 到哪里拿预览构建
 
-升级分支的 `Preview build` 工作流运行静态检查和竞态测试后，构建 Windows x64/ARM64、macOS Apple Silicon/Intel 四种包，并附带含依赖的源码包及 `SHA256SUMS`。构建产物放在对应 Actions 运行记录的 Artifacts 中，保留 14 天；这不是 GitHub Release，也不会创建正式版本标签。[查看工作流](https://github.com/gylive/ccodex-sleep-state/actions/workflows/preview.yml)
+升级分支的 `Preview build` 工作流运行静态检查和竞态测试后，构建 Windows x64/ARM64、macOS Apple Silicon/Intel 四种包，并附带含依赖的源码包及 `SHA256SUMS`。构建产物放在对应 Actions 运行记录的 Artifacts 中，保留 14 天；这不是 GitHub Release，也不会创建正式版本标签。[查看工作流](https://github.com/NanSsye/ccodex-sleep-state/actions/workflows/preview.yml)
 
 工作流文件存在不代表本次构建已成功；下载前核对对应提交的运行结果与校验文件。未跑完或失败的结果不写成已验收。
 

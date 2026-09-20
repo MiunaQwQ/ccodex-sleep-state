@@ -1,6 +1,6 @@
 # macOS：解压后启动，不用安装 Go
 
-Apple 芯片选 `darwin-arm64`，Intel 芯片选 `darwin-amd64`。到 [Releases](https://github.com/NanSsye/ccodex-sleep-state-r14/releases) 下载并核对来源、SHA256，完整解压到自己的目录，例如 `~/Applications/ccodex-sleep-state`。源码构建见[开发说明](development.md)。
+Apple 芯片选 `darwin-arm64`，Intel 芯片选 `darwin-amd64`。到 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 下载并核对来源、SHA256，完整解压到自己的目录，例如 `~/Applications/ccodex-sleep-state`。源码构建见[开发说明](development.md)。
 
 > 当前仍是公开测试版。教程对应当前源码，旧包未必包含新入口；以对应 Release 为准。真实测试和未验证内容见[问题与验收清单](issues-and-verification.md)。
 

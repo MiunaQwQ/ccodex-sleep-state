@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 	"github.com/gylive/ccodex-sleep-state/internal/routepool"
 )
 
@@ -12,12 +13,13 @@ type PoolRow struct {
 	Label    string `json:"label"`
 	Protocol string `json:"protocol"`
 	routepool.Entry
+	Connection proxyroute.ConnectionHealth `json:"connection"`
 }
 
 func (e *Engine) PoolStatus() []PoolRow {
 	rows := make([]PoolRow, 0, len(e.routes))
 	for _, r := range e.routes {
-		rows = append(rows, PoolRow{r.ID, r.DisplayName, r.Protocol, e.pool.Get(r.ID)})
+		rows = append(rows, PoolRow{r.ID, r.DisplayName, r.Protocol, e.pool.Get(r.ID), r.ConnectionHealth()})
 	}
 	return rows
 }

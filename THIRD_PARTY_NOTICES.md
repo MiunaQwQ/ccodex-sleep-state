@@ -2,6 +2,10 @@
 
 本项目使用开源库实现协议与配置处理，不包含个人代理配置、订阅、认证凭据或网关数据。
 
+## 上游项目
+
+本仓库由 NanSsye 基于 [gylive/ccodex-sleep-state](https://github.com/gylive/ccodex-sleep-state) 二次开发。原作者及原贡献者的版权、提交历史和 GPL-3.0 许可证予以保留；本仓库的新增功能、修复和发行由 NanSsye 维护。本文及发布包不代表上游作者或依赖项目为二次开发版本背书。
+
 ## 直接依赖
 
 - [Mihomo](https://github.com/MetaCubeX/mihomo)：出站协议适配和订阅 URI 转换，采用 GPL-3.0。这也是本项目采用 GPL-3.0、而不是宽松许可证的原因。

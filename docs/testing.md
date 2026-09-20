@@ -35,7 +35,7 @@
 - 缺失中转 `base_url` 的局部补全、保留其他 TOML 配置与拒绝不安全定位。
 - 服务配置接口的鉴权、参数校验、备份及原有拒绝/限流保护。
 
-本轮本地全量 `go test ./...`、`go vet ./...` 与 `go test -race -count=1 ./...` 已通过。额外回归覆盖：写盘失败仍保留 401/403/429、自动探测与正式请求原子争用、固定模式后台只采一份、旧固定路由清除冲突设置，以及停用节点在普通/压缩/模型列表请求中均不派发。浏览器已验证手动粘贴、TXT 载入、去重后两节点导入、清单全选停用与回收、高级预设保存、固定策略保存和一键只读检测；使用隔离目录与本地模拟订阅，没有对这些假节点发送模型请求。**本节不是对远端 CI 的预判**：提交对应的各平台构建结果以实际运行记录为准。[查看分支工作流](https://github.com/gylive/ccodex-sleep-state/actions)
+本轮本地全量 `go test ./...`、`go vet ./...` 与 `go test -race -count=1 ./...` 已通过。额外回归覆盖：写盘失败仍保留 401/403/429、自动探测与正式请求原子争用、固定模式后台只采一份、旧固定路由清除冲突设置，以及停用节点在普通/压缩/模型列表请求中均不派发。浏览器已验证手动粘贴、TXT 载入、去重后两节点导入、清单全选停用与回收、高级预设保存、固定策略保存和一键只读检测；使用隔离目录与本地模拟订阅，没有对这些假节点发送模型请求。**本节不是对远端 CI 的预判**：提交对应的各平台构建结果以实际运行记录为准。[查看分支工作流](https://github.com/NanSsye/ccodex-sleep-state/actions)
 
 ### 真实中转：模型列表成功，生成未通过
 
@@ -179,7 +179,7 @@
 
 GitHub Actions 在 Windows、macOS、Linux runner 上执行 `go vet`、全包竞态测试和构建。Release 必须等三个系统的验证通过，再生成 Windows x64/ARM64、macOS Apple Silicon/Intel 四种包，以及含依赖的源码包和 SHA256 校验文件。
 
-[查看对应提交和标签的运行结果](https://github.com/gylive/ccodex-sleep-state/actions)。**Windows runner 测试不是 Windows 桌面版 Codex 的完整实际使用测试。** Windows ARM64、Intel Mac 也尚未各自在桌面环境联调。
+[查看对应提交和标签的运行结果](https://github.com/NanSsye/ccodex-sleep-state/actions)。**Windows runner 测试不是 Windows 桌面版 Codex 的完整实际使用测试。** Windows ARM64、Intel Mac 也尚未各自在桌面环境联调。
 
 还需要继续观察：长会话上下文、不同客户端版本、state 过期与上游规则变化，以及实际任务中的质量差异。不能仅凭 `usable: true` 或 292 长度给回答质量打分。
 

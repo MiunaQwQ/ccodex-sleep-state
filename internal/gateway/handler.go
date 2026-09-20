@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gylive/ccodex-sleep-state/internal/proxyroute"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 	"github.com/gylive/ccodex-sleep-state/internal/turnstate"
 )
@@ -242,15 +243,11 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if compactTicket {
 		stateCheck = "compact_ticket_unchecked"
 	}
-	transport := e.routes[route].Transport
+	var headerTimeout time.Duration
 	if kind := endpointKind(r.URL.Path); kind == "image_generation" || kind == "image_edit" {
-		// Image jobs can return their first bytes only after rendering. Keep the
-		// same node dialer, with a separate timeout and connection pool, so this
-		// cannot mutate transport settings under concurrent chat/probe requests.
-		transport = transport.Clone()
-		transport.ResponseHeaderTimeout = 10 * time.Minute
-		defer transport.CloseIdleConnections()
+		headerTimeout = 10 * time.Minute
 	}
+	transport := e.routes[route].ClientTransport(headerTimeout, func(event proxyroute.ConnectionEvent) { e.recordConnectionEvent(route, event) })
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = target.Scheme

@@ -177,7 +177,7 @@ func testNode(parent context.Context, row map[string]any, target string, timeout
 		result.Message = "测试目标无效"
 		return result
 	}
-	client := http.Client{Transport: route.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := http.Client{Transport: route.ClientTransport(0, nil), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	started := time.Now()
 	response, err := client.Do(req)
 	result.DurationMS = time.Since(started).Milliseconds()

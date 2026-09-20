@@ -5,6 +5,9 @@ cd "$(dirname "$0")/.."
 REPO="$PWD"
 SOURCE_COMMIT="$(git rev-parse HEAD)"
 VERSION="${VERSION:-$(git describe --tags --always --dirty)}"
+if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then echo '版本号含不安全字符' >&2; exit 1; fi
+NOTES="docs/release-$VERSION.md"
+if [ ! -f "$NOTES" ]; then echo "缺少逐项发布说明：$NOTES" >&2; exit 1; fi
 if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
   echo '请先提交源码再构建，确保源码包与程序一致。' >&2
   exit 1
@@ -21,13 +24,15 @@ git archive "$SOURCE_COMMIT" | tar -x -C "$BUILD_ROOT"
 cd "$BUILD_ROOT"
 export CGO_ENABLED=0 COPYFILE_DISABLE=1 GOWORK=off
 for target in windows-amd64 windows-arm64 darwin-arm64 darwin-amd64; do
-  name="ccodex-sleep-state-$target"
+  name="ccodex-sleep-state-$VERSION-$target"
   mkdir -p "$OUT/$name"
   binary=ccodex-sleep-state
   if [[ "$target" == windows-* ]]; then binary="$binary.exe"; fi
   GOOS="${target%-*}" GOARCH="${target#*-}" go build -buildvcs=false -trimpath -ldflags="-s -w -X main.version=$VERSION" -o "$OUT/$name/$binary" ./cmd/ccodex-sleep-state
   cp LICENSE THIRD_PARTY_NOTICES.md README.md CHANGELOG.md "$OUT/$name/"
   printf '%s\n' "$SOURCE_COMMIT" > "$OUT/$name/SOURCE_COMMIT"
+  printf '%s\n' "$VERSION" > "$OUT/$name/VERSION"
+  cp "$NOTES" "$OUT/$name/RELEASE_NOTES.md"
   cp -R docs "$OUT/$name/"
   if [[ "$target" == windows-* ]]; then
     cp scripts/start.cmd "$OUT/$name/"
@@ -41,6 +46,7 @@ done
 mkdir "$OUT/source"
 git -C "$REPO" archive "$SOURCE_COMMIT" | tar -x -C "$OUT/source"
 (cd "$OUT/source" && go mod vendor)
-tar -czf "$OUT/ccodex-sleep-state-source.tar.gz" -C "$OUT/source" .
-(cd "$OUT" && shasum -a 256 *.zip *.tar.gz > SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+tar -czf "$OUT/ccodex-sleep-state-$VERSION-source.tar.gz" -C "$OUT/source" .
+(cd "$OUT" && shasum -a 256 *.zip *.tar.gz > "ccodex-sleep-state-$VERSION-SHA256SUMS.txt" && shasum -a 256 -c "ccodex-sleep-state-$VERSION-SHA256SUMS.txt")
+cp "$NOTES" "$OUT/RELEASE_NOTES.md"
 printf '构建完成：%s\n' "$OUT"

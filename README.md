@@ -1,184 +1,98 @@
 # ccodex-sleep-state
 
-**一个尝试改善 Codex 降智、限流和连接问题的本地工具。不是百分百有效，但把这套思路做成了大家能自己用的程序。**
+由 **NanSsye 维护的 Codex 本地连接与 turn-state 管理工具**。通过网页面板管理代理节点、主票与备用票、手动采集、连接恢复和请求诊断。
 
-做这个项目，是因为 Codex 有时用着用着就不对劲：回答质量变了，请求被限了，换个配置又接不上。我们从代理出口和 turn-state 入手做了一些尝试，觉得值得继续验证，就整理成 Go 程序开源了。
+本项目基于 **[gylive/ccodex-sleep-state](https://github.com/gylive/ccodex-sleep-state)** 二次开发。感谢上游作者和贡献者提供的基础实现；保留原提交历史、版权及 GPL-3.0 许可证。本仓库的功能调整、修复和发布由 NanSsye 维护，与上游版本分别迭代。
 
-它不会增加账号额度，也不能保证换个出口就恢复质量。真正要做的是：**让连接、配置、采集和排错都看得见，别把所有问题都留给使用者手改文件。**
+[下载发布版](https://github.com/NanSsye/ccodex-sleep-state/releases) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NanSsye/ccodex-sleep-state/issues) · [上游项目](https://github.com/gylive/ccodex-sleep-state)
 
-一个服务，一个本地网页。官方 ChatGPT、官方 API key 和 Responses 中转按各自的认证方式走；支持 Astra、5.6 Sol、5.6 Terra，能否调用仍取决于你的账号和上游。已有代理软件就填本地 HTTP / SOCKS5 地址，也可以导入自己的订阅或本地文件。
+## 当前版本：r18
 
-[Windows 上手](docs/windows.md) · [macOS 上手](docs/macos.md) · [面板教程](docs/web-panel.md) · [代理与订阅](docs/proxies.md) · [问题与验收清单](docs/issues-and-verification.md) · [测试记录](docs/testing.md) · [联系与交流](#一起试一起反馈)
+- **节点连接自动恢复**：同一代连接连续发生两次网络错误后，重建该节点的代理客户端和 HTTP 连接池。后续请求使用新连接，在途请求继续使用原连接直至结束；保留主票、备用票及来源节点，不自动重发生成请求。
+- **错误诊断更明确**：记录 DNS、TLS、超时、连接重置、连接拒绝、响应流中断等脱敏类别，以及错误阶段、连接代次和重建结果。「时间与诊断详情」显示最近连接错误及重建次数。
+- **版本化发布文件**：Mac、Windows、源码包和校验文件的文件名均带版本号，包内附 `VERSION`、`SOURCE_COMMIT` 和逐项更新说明。
 
-> **当前仍是公开测试版。** 此 README 描述当前源码；下载时以对应 Release 的说明为准，旧发布包不会自动多出新功能。远程压缩现在原样转发官方 `/responses/compact`，新版 V2 仍使用 `/responses` 的 `compaction_trigger`；两条路径都不依赖 state 采集。真实上游、Team 和长期运行仍需分别验收，具体边界见[问题与验收清单](docs/issues-and-verification.md)。
+连接重建只处理本地连接状态，不能保证故障节点或远端服务立即恢复。同一节点两次重建尝试至少间隔 10 秒，以避免重复构建；这不会阻塞聊天或给手动打票增加等待。账号拒绝、限流、手动停用和自动采集失败清单仍按原规则处理。
 
-## 下载后，怎么开始
+## 二次开发中维护的功能
 
-先确认 Codex **不经过本工具时原本就能用**。官方账号先登录；中转先配好自己的 API key。用 CCS / CC Switch 的，先选好这次要用的配置，再退出 Codex，暂时别继续切换。
+| 功能 | 行为 |
+| --- | --- |
+| 主票与备用票 | 按账号和模型隔离，票绑定取得时的节点，备用按取得顺序接替 |
+| 手动丢弃 | 主票、备用票可单张丢弃，确认票号后执行；结果持久化，防止迟到响应把已丢弃票放回 |
+| 手动打票 | 每次点击随机尝试一个可用节点，不受本地冷却、失败退避、备用错峰或小时预算的时间限制，不占用自动采集预算 |
+| 自动采集 | 按既定轮询、错峰与预算执行；主备满额后停止，出现空位再补采 |
+| 上游响应模型 | 显示响应声明的模型名，与请求模型不同时标记；未返回模型时明确提示 |
+| 压缩请求带票 | 已有可用主票且开启注入时，V1/V2 压缩携带主票并使用其来源节点；不等待采集，不按普通生成规则拦截压缩响应 |
+| 节点管理 | 导入订阅与本地文件，搜索、勾选、测速、停用与手动恢复节点 |
+| 物理网卡出站 | macOS 可将节点连接和 DNS 绑定物理网卡，减少本机 VPN 对出站路径的影响 |
+| 配置接管 | 备份并临时接入当前 Codex provider，停止后恢复；配置冲突提供检查与恢复流程 |
 
-1. 到 [Releases](https://github.com/NanSsye/ccodex-sleep-state-r14/releases) 下载并完整解压。普通 Windows 选 `windows-amd64`，Windows ARM 选 `windows-arm64`；Apple 芯片 Mac 选 `darwin-arm64`，Intel Mac 选 `darwin-amd64`。
-2. **Windows 双击 `start.cmd`，macOS 双击 `start.command`。** 浏览器会自动打开并进入本地面板，不需要先复制口令。
-3. 程序会自动备份并接入，打开面板。看到已接管后，**重启 Codex，新建会话**，发一条短消息；不用再点一次接入。旧会话不会被热切换。
+手动打票仍保留网络超时、已有采集正在进行、主备满额、账号登录/权限异常及节点停用等检查，不会绕过服务端限制。
 
-已有代理、订阅、模型和注入开关会保留；没有配过来源时尝试识别常见本地代理。首次 `setup` 没有明确设置兜底策略，就采用“采不到 state 时先正常转发”；之前明确选过严格模式的会继续保留。
+## 下载与启动
 
-没有找到本地代理，或你只拿到了订阅链接，再到「订阅与代理」填写并保存。首页「一键接入 Codex」用于需要时重新检查和修复，不是每次启动的必点步骤。
+前提是 Codex 已完成自己的登录或 API 配置。下载 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 中与电脑匹配的文件，完整解压：
 
-如果浏览器没有打开，按终端显示的地址手动进入，再粘贴本次管理口令。默认地址是 [http://127.0.0.1:17841/admin/](http://127.0.0.1:17841/admin/)。如果包里没有启动脚本，可以在程序目录执行以下命令；旧版不支持 `setup` 时先更新。
+| 电脑 | r18 文件 | 启动入口 |
+| --- | --- | --- |
+| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r18-windows-amd64.zip` | `start.cmd` |
+| Windows ARM64 | `ccodex-sleep-state-r18-windows-arm64.zip` | `start.cmd` |
+| Mac Apple Silicon | `ccodex-sleep-state-r18-darwin-arm64.tar.gz` | `start.command` |
+| Mac Intel | `ccodex-sleep-state-r18-darwin-amd64.tar.gz` | `start.command` |
 
-Windows：
+1. 双击对应启动脚本，保持终端窗口运行。
+2. 浏览器打开本地面板；没有配置过节点时，在「订阅与代理」添加自己的来源。
+3. 确认显示已接管后，重启 Codex、新建任务，再检查请求是否出现在面板中。
+
+默认面板地址为 `http://127.0.0.1:17841/admin/`。浏览器没有自动进入时，使用终端显示的本次管理口令；口令也保存在服务数据目录的 `runtime.json` 中，不要公开该文件。
+
+也可以在解压目录运行：
 
 ```powershell
+# Windows PowerShell；程序名开头是两个 c
 .\ccodex-sleep-state.exe setup
 ```
 
-macOS：
-
 ```sh
+# macOS
 ./ccodex-sleep-state setup
 ```
 
-`setup` 会创建缺失的服务配置、启动服务并打开面板；已有订阅和代理设置不会被重置。自动接入只检查本机 `127.0.0.1` 的常见 SOCKS5 端口，不扫描网络、不读取代理软件账号库。**启动本身不发送模型请求**；接入 Codex 后的采集可能消耗额度。服务 JSON 写坏了会进入修复面板，不会因为启动失败就静默删掉旧文件。
+Windows CMD 对应 `ccodex-sleep-state.exe setup`。退出用 `Ctrl+C`，等待配置恢复完成。升级前停止旧程序，替换程序和文档，保留自己的配置与数据目录。
 
-服务运行时保留终端窗口。退出用 **Ctrl+C**，等配置恢复完成，再重启 Codex。关闭浏览器、关闭注入和停止服务，是三个不同操作。
+所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r18-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
 
-## 面板里能做什么
+[Windows 教程](docs/windows.md) · [macOS 教程](docs/macos.md) · [面板教程](docs/web-panel.md) · [代理与订阅](docs/proxies.md)
 
-| 你想做的事 | 去哪里 |
-| --- | --- |
-| 看 Codex 有没有接上、请求有没有经过 | 「开始使用」里的配置、请求计数和会话 |
-| 开关 state 注入 | 「turn-state 注入」；开关开启不代表已经拿到合格 state；合格主用/备用 state 会在本机私有备份中保留 |
-| 切 Astra / Sol / Terra | 「连接设置」里的模型与账号规则；修改默认模型后重启 Codex 或新建会话 |
-| 调整采集时间与次数 | 「连接设置」→「采集时间与次数」；支持默认值、低频预设、撤销修改和保存确认 |
-| Team 账号不再死等 292 | 「连接设置」选自动识别，识别不了就手动选 Team |
-| 没有合格 state 时先正常回复 | 首次 setup 未设置策略时采用普通转发兜底；「连接设置」可明确改成严格 |
-| 填本地代理、远程订阅、本地订阅文件 | 「订阅与代理」；不用手改 JSON，也不用猜环境变量在哪个终端生效 |
-| 测试连接、固定出口、恢复自动选择 | 「路由」；连接成功不代表拿到了合格 state |
-| 导入节点仍受本机 VPN 影响 | macOS「连接设置」→「高级设置」→「物理网卡」；节点连接和 DNS 一起绑定物理网卡，面板显示网卡名称，失败不回退到 VPN |
-| 从旧版本或 CCS 冲突中恢复 | 「检查与修复配置」；先预览，再确认保留当前配置或恢复备份 |
-| 不知道怎么反馈问题 | 「遇到问题」下载脱敏诊断，或运行 `doctor` |
+## 连接出问题时
 
-[面板教程](docs/web-panel.md)有逐步操作，不需要先看懂代码。我们也对照研究了 GPT-Load 的路由诊断、失败分类和部署体验，但**没有把它的账号池、所有协议、计费和多渠道平台完整移植进来**。[功能映射与取舍](docs/gpt-load-design.md)
+先看「时间与诊断详情」中的错误类别和连接重建记录。连接连续失败会自动重建该节点的连接，下一次请求再尝试；当前失败的生成请求不会自动重放，避免重复消耗。
 
-## 292、332 到底是什么
+- **网络错误**：检查节点和网络是否可用；自动重建后仍失败时可换用备用票，或手动丢弃问题主票再采集。
+- **401 / 403 / 429**：处理登录、权限或等待服务端恢复，连接重建不能解除这些限制。
+- **配置冲突**：到「检查与修复配置」预览并处理。使用 CCS 等工具切换 provider 时，先停止本服务，切换后再启动。
+- **模型名不一致**：面板显示的是上游响应声明。该字段和 state 长度都不能独立证明底层模型或回答质量。
 
-程序处理的是响应里的 `X-Codex-Turn-State`。它从候选出口发短请求，检查封装、时间和密文块数，保存可用值；后续请求带上这份值，并走对应出口。
+`doctor` 可生成诊断信息。常规日志只记录元数据与脱敏错误分类，不记录提示词、回复正文、完整票或节点密码。反馈请提交到[本仓库 Issues](https://github.com/NanSsye/ccodex-sleep-state/issues)，注明版本、系统、时间和错误类别。
 
-| 账号规则 | 本项目接纳的经验形状 | 不会当成合格值 |
-| --- | --- | --- |
-| 个人 | 10 块，通常 292 字符 | 11 块 / 312 字符 |
-| Team / Business | 12 块，通常 332 字符 | 13 块 / 356 字符 |
+## 使用边界
 
-**这不是 OpenAI 公布的质量指标。** 符合长度不证明模型“满血”，不符合也不能只凭这一点断定代理坏了或模型降智了。
+工具不会增加账号额度或替账号开通模型权限。个人规则中的 292 字符、Team 规则中的 332 字符是本地经验筛选条件，不是 OpenAI 公布的质量指标；采集可能消耗实际额度。
 
-自动识别使用当前请求里的套餐提示，提示不明确时会说明采用了什么规则；不会仅凭长度把账号认成 Team。你也可以在面板明确选个人或 Team。state 按账号、凭据和模型隔离，不在 Astra、Sol、Terra 之间混用。
+官方 ChatGPT、官方 API key 和 Responses 中转按各自认证方式转发；API 中转不采集或注入官方 ChatGPT 的票。当前转发使用 HTTP / SSE。源码测试、交叉编译成功与真实节点长期稳定性是不同验证项，具体以每个 Release 的验证说明为准。
 
-没有合格 state 时有两种选择：
+## 开发与来源
 
-- **严格模式。** 不使用不合格 state；采集失败返回明确原因。明确选过 `strict`，之后 `setup` 不会自动覆盖。底层转发在策略为空时仍按严格处理。
-- **普通转发兜底。** 首次 `setup` 没有明确策略时采用，也可在面板自行开启；重新点首页接入按钮会提示并选择此模式。 没有可用 state 时不注入，仍走选定出口，正式请求最多转发一次。状态会说明本次没有注入，而不是假装采集成功。
-
-兜底不是解除限流。401、403、429 的停止规则照常生效；已经发到上游的正式生成不会换出口再重放一次。
-
-## CCS、中转和官方登录怎样兼容
-
-程序只处理当前 Codex 选择的 provider，不接管 CCS 的账号数据库。它读取上游与认证方式，临时把 Codex 的入口接到本地服务，停止后恢复。
-
-| 你原来怎么用 | 本工具怎么处理 |
-| --- | --- |
-| 官方 ChatGPT 登录 | 可采集、注入 state，也可关闭注入 |
-| OpenAI 官方 API key | 按 API 通道转发，不当成 ChatGPT 订阅登录 |
-| Responses 中转、CCS API key | 保留原上游和 API key 方式，不向中转发送官方登录凭据，不注入官方 state |
-| Codex profile / 独立 Codex Home | 需要选择同一份配置；本工具不会自动清空项目或任务级覆盖 |
-
-运行中只改注释或无关设置，不应再把整份配置判为冲突。**CCS 真正切换了 provider、上游或认证时，仍会停止转发**，防止凭据送错地方。这时去面板检查并保留当前配置，再重新接管；不要删除事务文件，也不用照着群消息盲改 TOML。
-
-最稳妥的切换顺序还是：**停止本服务 → CCS 切换 → 启动本服务 → 重启 Codex。** 兼容不是让两个程序同时抢写同一份配置。
-
-远程上下文压缩单独验收：V1 `/responses/compact` 现在原样转发，不再改写成普通 `/responses` 或追加触发项；V2 仍按官方 `compaction_trigger` 流程转发。压缩不会等待 state，也不会因响应缺少 state 头而拦截。[压缩问题进展](docs/issues-and-verification.md#p01-远程上下文压缩优先项)
-
-## 有问题，先看这几项
-
-| 现象 | 下一步 |
-| --- | --- |
-| 面板能打开，但显示「未接管」 | 服务启动不等于 Codex 接入。处理配置提示；确认不是 `--no-config` 只读模式 |
-| Codex 能回复，面板没有请求 | 重启 Codex，检查是不是另一份配置、profile、任务覆盖或另一实例 |
-| `codex_config_changed` / 409 | 面板点「检查与修复配置」，优先保留 CCS 当前配置，再重新接管 |
-| `state_unavailable` / 本地 503 | 看账号规则、采集诊断和冷却；需要先用时可明确选普通转发兜底或关闭注入 |
-| `state_shape_changed` | 正式请求可能已经消耗额度，服务不会自动重放；检查规则和上游变化 |
-| 415 / 不支持请求编码 | 新版支持官方客户端的 gzip/zstd 请求；确认不是仍在运行旧版，再查看脱敏诊断 |
-| 上游 503 / 502 / 超时 | 查看出口连接及上游情况，不能改个 state 长度掩盖网络问题 |
-| 401 / 403 / 429 | 分别处理登录、访问权限或等待限流恢复，不通过换 IP 继续撞 |
-| 服务配置 JSON 坏了 | `setup` 打开只读修复面板，确认备份后重建，重新启动 |
-| Codex 提示 `503 service_not_ready` | 直接打开错误里的 `admin_url`，按面板唯一的绿色按钮「一键接入 / 检查与修复」操作；不要在 CCS 或 Codex 里手改配置 |
-| Codex TOML 坏了 | 先保留备份；使用明确的重建流程或让 CCS 重新生成，不从坏文件里猜 API key |
-
-给群友或 AI Agent 发排查信息，先运行：
-
-```powershell
-.\ccodex-sleep-state.exe doctor
+```sh
+git clone https://github.com/NanSsye/ccodex-sleep-state.git
+cd ccodex-sleep-state
+go test ./...
+go build -trimpath -o ccodex-sleep-state ./cmd/ccodex-sleep-state
 ```
 
-macOS 对应 `./ccodex-sleep-state doctor`。不要发 `auth.json`、管理口令、完整订阅或整个数据目录。更多问题、修复与尚未验收项都记录在[问题清单](docs/issues-and-verification.md)，不会只留在聊天记录里。
+Go 版本以 `go.mod` 为准；网页资源嵌入程序，无需另起前端服务。Go module 路径暂时保留上游名称以兼容现有代码，项目维护与发行入口以本 README 中的 NanSsye 仓库为准。
 
-## v0.4.0：更简单的配置与可控代理池
+[开发说明](docs/development.md) · [架构说明](docs/architecture.md) · [隐私与安全](SECURITY.md) · [第三方软件说明](THIRD_PARTY_NOTICES.md)
 
-本版新增：**拿到可用值后固定使用**、多订阅代理池、手动粘贴/TXT 导入、已用/失败清单、单节点重试，以及独立出口与大请求设置。首页给出下一步操作，复杂参数留在高级设置里。
-
-现有版本不会自动升级。下载前请看[v0.4.0 发布说明](docs/release-v0.4.0.md)和[升级与回退指南](docs/upgrade-0.4.0-preview.md)，运行边界见[合规与风险说明](docs/compliance.md)。
-
-## 用之前知道这些边界
-
-- 支持的模型是 **`gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`**，上游必须实际提供对应模型。工具不会替你开通权限，也不会悄悄换模型。
-- 目前走 **Responses HTTP / SSE**，不支持 WebSocket 和任意协议转换。
-- 采集会使用实际额度。默认每轮最多 6 个候选出口，单次探测最多 20 秒，两轮至少间隔 180 秒。正常生成请求不自动重放。
-- 代理支持 HTTP、HTTPS、SOCKS5，以及 Clash/Mihomo YAML、逐行 URI、Base64 URI 订阅。内嵌出站适配支持 AnyTLS、SS、SSR、VMess、VLESS、Trojan、Hysteria、Hysteria2、TUIC；不导入订阅的 TUN、DNS 或系统规则。[具体限制](docs/proxies.md)
-- 认证值和完整 state 不写常规日志。程序没有遥测，不把日志上传给作者；但本地代理配置和恢复备份仍可能含敏感信息，要自己保管。
-- 不切换系统代理，不刷新 Codex 登录，不使用重置卡。中转站能接上不代表 state 思路对中转也有效。
-
-## 文件一般放在哪
-
-| 内容 | Windows | macOS |
-| --- | --- | --- |
-| 程序，建议完整解压位置 | `%LOCALAPPDATA%\Programs\ccodex-sleep-state` | `~/Applications/ccodex-sleep-state` |
-| 本工具配置与日志 | `%LOCALAPPDATA%\ccodex-sleep-state` | `~/Library/Application Support/ccodex-sleep-state` |
-| 默认 Codex 配置 | `%USERPROFILE%\.codex\config.toml` | `~/.codex/config.toml` |
-| 接管前备份 | 与 Codex 的 `config.toml` 同目录 | 与 Codex 的 `config.toml` 同目录 |
-| 修复时新增的归档 | 本工具数据目录下的 `backups` | 本工具数据目录下的 `backups` |
-
-设置过 `CODEX_HOME` 会跟随它；本工具还有 `CCODEX_STATE_HOME` 和 `--data-dir`。不确定实际用的是哪份，运行 `paths`，不要凭目录名猜。
-
-## 一起试，一起反馈
-
-用起来有没有改善、哪个版本接不上、什么情况下又出问题，都欢迎来聊。报错和复现步骤也可以提 [Issue](https://github.com/gylive/ccodex-sleep-state/issues)，方便后面查找。
-
-| 个人微信 · 等待 | QQ 群 · 此间大梦无边 |
-|:---:|:---:|
-| <img src="docs/assets/wechat-personal.jpg" alt="作者个人微信二维码，扫码添加好友" width="280"> | <img src="docs/assets/qq-group.jpg" alt="QQ 群“此间大梦无边”二维码，群号 754842541" width="280"> |
-| 扫码添加作者个人微信；这是好友二维码，不是微信群入口。 | 扫码，或搜索群号 **754842541**。 |
-
-### 朋友的卡网 · RedeemAI
-
-<img src="docs/assets/redeemai-ad.jpg" alt="朋友的卡网 RedeemAI：AI 服务兑换及 Codex 额度相关商品，具体信息见卡网页面" width="640">
-
-朋友的卡网：[faka.redeemai.org](https://faka.redeemai.org)。友情展示，商品、价格及售后以卡网页面为准，图中的服务承诺未由本项目核验。本工具免费使用，无需购买；不代表 OpenAI 官方授权或背书。
-
-
-反馈时带上系统、Codex 版本、工具版本和错误提示就够了。**不要发账号凭据、完整订阅链接或未经检查的配置文件。**
-
-## 想改代码
-
-项目用 Go 编写，静态管理页嵌入二进制，不需要另外启动前端服务。
-
-- `cmd/ccodex-sleep-state`：命令、一键入口、诊断。
-- `internal/codexconfig`：provider 解析、接管、语义检查与可恢复修复。
-- `internal/gateway`：模型与账号隔离、采集、压缩和流式转发。
-- `internal/turnstate`：封装规则、当前值与备用值。
-- `internal/proxyroute`：订阅和出站连接。
-- `internal/service`：单实例、面板、配置热切换和请求诊断。
-
-[构建方法](docs/development.md) · [设计取舍](docs/architecture.md) · [GPT-Load 功能映射](docs/gpt-load-design.md) · [隐私说明](SECURITY.md)
-
-## 许可证
-
-GPL-3.0，见 [LICENSE](LICENSE)。代理部分复用了 Mihomo，见 [依赖说明](THIRD_PARTY_NOTICES.md)。本项目与 OpenAI、Mihomo、GPT-Load 没有隶属关系。
+许可证为 **GPL-3.0**，见 [LICENSE](LICENSE)。保留并感谢上游 `gylive/ccodex-sleep-state`、原贡献者及 Mihomo 等依赖项目。本项目与 OpenAI 没有隶属关系。

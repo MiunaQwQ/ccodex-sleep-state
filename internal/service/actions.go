@@ -613,7 +613,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			probeCtx, stop := context.WithTimeout(ctx, 12*time.Second)
 			defer stop()
 			req, _ := http.NewRequestWithContext(probeCtx, "GET", c.effective().Upstream+"/models", nil)
-			client := &http.Client{Transport: routes[index].Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+			client := &http.Client{Transport: routes[index].ClientTransport(0, nil), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 			start := time.Now()
 			resp, err := client.Do(req)
 			if err != nil {

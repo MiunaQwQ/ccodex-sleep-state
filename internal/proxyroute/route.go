@@ -26,8 +26,8 @@ import (
 	corelog "github.com/metacubex/mihomo/log"
 )
 
-// A route is immutable once loaded. States refer to its index, so a request
-// uses the same egress that supplied its state. Reloads require a restart.
+// Route identity is immutable; connection generations may recover in place.
+// States always retain the original source node, including after recovery.
 type Route struct {
 	ID string
 	// StableID identifies connection settings, independent of list order or display name.
@@ -39,6 +39,7 @@ type Route struct {
 	Transport   *http.Transport
 	NodePath    *netpath.Path
 	close       func() error
+	runtime     *routeRuntime
 }
 
 var quietOnce sync.Once
@@ -48,7 +49,13 @@ func QuietCore() {
 }
 
 func (r Route) Close() {
-	r.Transport.CloseIdleConnections()
+	if r.runtime != nil {
+		r.runtime.close()
+		return
+	}
+	if r.Transport != nil {
+		r.Transport.CloseIdleConnections()
+	}
 	if r.close != nil {
 		_ = r.close()
 	}
@@ -83,21 +90,36 @@ func Build(node map[string]any, index int, paths ...*netpath.Path) (Route, error
 		path = paths[0]
 		options = append(options, adapter.WithDialerForAPI(path))
 	}
-	proxy, err := adapter.ParseProxy(copyNode, options...)
+	// Keep a private immutable recipe; parsers receive a fresh deep copy.
+	recipe, err := json.Marshal(copyNode)
 	if err != nil {
-		return Route{}, errors.New("node rejected by outbound core; check protocol fields")
+		return Route{}, errors.New("node settings cannot be copied")
 	}
-	tr := baseTransport()
-	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		metadata := &C.Metadata{NetWork: C.TCP, Type: C.INNER}
-		if err := metadata.SetRemoteAddress(address); err != nil {
-			return nil, errors.New("invalid upstream address")
+	runtime, err := newRuntime(func() (*http.Transport, func() error, error) {
+		var fresh map[string]any
+		if json.Unmarshal(recipe, &fresh) != nil {
+			return nil, nil, errors.New("invalid node recipe")
 		}
-		conn, err := proxy.DialContext(ctx, metadata)
+		proxy, err := adapter.ParseProxy(fresh, options...)
 		if err != nil {
-			return nil, errors.New("proxy connection failed")
+			return nil, nil, errors.New("node rejected by outbound core; check protocol fields")
 		}
-		return conn, nil
+		tr := baseTransport()
+		tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			metadata := &C.Metadata{NetWork: C.TCP, Type: C.INNER}
+			if err := metadata.SetRemoteAddress(address); err != nil {
+				return nil, errors.New("invalid upstream address")
+			}
+			conn, err := proxy.DialContext(ctx, metadata)
+			if err != nil {
+				return nil, &connectionError{category: ErrorCategory(err)}
+			}
+			return conn, nil
+		}
+		return tr, proxy.Close, nil
+	})
+	if err != nil {
+		return Route{}, err
 	}
 	protocol, _ := node["type"].(string)
 	connection, _ := node["__source_uri"].(string)
@@ -105,7 +127,7 @@ func Build(node map[string]any, index int, paths ...*netpath.Path) (Route, error
 		encoded, _ := json.Marshal(map[string]any{"proxies": []any{node}})
 		connection = string(encoded)
 	}
-	return Route{Connection: connection, ID: id, StableID: stableID, DisplayName: nodeDisplayName(node, protocol), Protocol: protocol, Transport: tr, NodePath: path, close: proxy.Close}, nil
+	return Route{Connection: connection, ID: id, StableID: stableID, DisplayName: nodeDisplayName(node, protocol), Protocol: protocol, Transport: runtime.current.transport, NodePath: path, runtime: runtime}, nil
 }
 
 // Labels come only from a subscription's explicit display name, never from
@@ -168,11 +190,17 @@ func Load(ctx context.Context, c settings.Config) ([]Route, error) {
 		}
 	}()
 	if c.Direct {
-		tr := baseTransport()
-		if path != nil {
-			tr.DialContext = path.DialContext
+		runtime, err := newRuntime(func() (*http.Transport, func() error, error) {
+			tr := baseTransport()
+			if path != nil {
+				tr.DialContext = path.DialContext
+			}
+			return tr, nil, nil
+		})
+		if err != nil {
+			return nil, err
 		}
-		routes = append(routes, Route{ID: "direct", StableID: "direct", DisplayName: "直连", Protocol: "direct", Transport: tr, NodePath: path})
+		routes = append(routes, Route{ID: "direct", StableID: "direct", DisplayName: "直连", Protocol: "direct", Transport: runtime.current.transport, NodePath: path, runtime: runtime})
 	}
 	seen := make(map[string]bool)
 	add := func(nodes []map[string]any) error {

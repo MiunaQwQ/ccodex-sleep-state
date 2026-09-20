@@ -329,7 +329,12 @@ async function refreshStatus() {
       full.append(textNode("strong", `${role} · ${card.id.slice(0, 8)} · ${card.route_label || card.route_id}`));
       full.append(textNode("p", `取得：${stateTime(card.acquired_at)} · 已取得 ${card.acquired_at?.startsWith("0001") ? "未知" : duration(card.age_seconds)}；签发：${stateTime(card.issued_at)}；本地预计到期：${stateTime(card.expires_at)}`));
       const measured=state.node_tests?.results?.[card.route_id];if(measured?.exit_ip)full.append(textNode("p",`最近测速出口：${measured.exit_ip} · ${stateTime(measured.at)}（测速时观测）`,"hint"));
- detail.append(full);
+ const connection = (state.pool_nodes || []).find(node => node.id === card.route_id)?.connection;
+      if (connection?.last_error) {
+        const names = {dns:"DNS 解析失败",tls:"TLS 握手或证书错误",timeout:"连接或读取超时",connection_reset:"连接被重置",connection_refused:"连接被拒绝",connection_closed:"连接已关闭",unexpected_eof:"响应流意外中断",io_error:"连接读写错误"};
+        full.append(textNode("p", `最近连接错误：${names[connection.last_error] || "连接异常"} · ${stateTime(connection.last_error_at)}。当前连接第 ${connection.generation} 代，自动重建 ${connection.recoveries} 次${connection.last_recovery_at ? `，最近重建 ${stateTime(connection.last_recovery_at)}` : ""}。${connection.recovery_error ? "本次重建失败，请检查节点设置。" : "重建不代表上游一定可达；已有票保留，下一次请求使用当前连接。"}`, "hint"));
+      }
+      detail.append(full);
     }
     if ((session.states || []).length) {
       row.append(cards);
