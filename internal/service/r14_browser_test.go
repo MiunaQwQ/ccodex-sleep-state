@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"github.com/gylive/ccodex-sleep-state/internal/settings"
 	"github.com/gylive/ccodex-sleep-state/internal/turnstate"
@@ -30,7 +31,13 @@ func TestBrowserR14Fixture(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
+		var input struct {
+			Model string `json:"model"`
+		}
+		json.NewDecoder(r.Body).Decode(&input)
+		model := map[string]string{"gpt-6-astra": "gpt-6-astra", "gpt-5.6-sol": "gpt-6-sol"}[input.Model]
+		payload, _ := json.Marshal(map[string]any{"type": "response.completed", "response": map[string]string{"model": model}})
+		fmt.Fprintf(w, "data: %s\n\n", payload)
 	}))
 	defer upstream.Close()
 	c, _ := panelControl(t, func(cfg *settings.Config) {

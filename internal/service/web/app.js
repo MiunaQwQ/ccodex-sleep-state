@@ -25,6 +25,20 @@ const collectionFields = {
   search_budget: "search-budget", search_pause_seconds: "search-pause",
   hourly_budget: "hourly-budget", idle_seconds: "collection-idle",
 };
+function responseModelLine(session) {
+  const observed = session.last_response;
+  const model = observed?.model;
+  const mismatch = Boolean(model && model !== session.model);
+  const line = textNode("div", "", `response-model${mismatch ? " is-mismatch" : model ? " is-match" : " is-unknown"}`);
+  const label = model || (observed ? observed.received ? "未返回可识别模型" : "未收到上游响应" : "等待回复");
+  line.append(textNode("span", `↳ 上游响应：${label}`));
+  if (model) line.append(textNode("span", mismatch ? "模型不一致" : "模型一致", "response-model-badge"));
+  line.title = observed
+    ? `最近返回 · ${observed.endpoint === "compact" ? "远程压缩" : "正式回复"} · ${new Date(observed.at).toLocaleString()}。仅显示上游声明的模型名称。`
+    : "收到正式回复后显示；后台采集不会覆盖这里。";
+  return line;
+}
+
 function readTiming() {
   return { ...Object.fromEntries(Object.entries(timingFields).map(([key, id]) => [key, Number($(id).value)])),
     collection: {cadence:$("collection-cadence").value, ...Object.fromEntries(Object.entries(collectionFields).map(([key, id]) => [key, Number($(id).value)]))} };
@@ -181,7 +195,7 @@ async function refreshStatus() {
     $("recent-requests").append(
       textNode(
         "div",
-        `${new Date(item.at).toLocaleTimeString()} · ${item.kind} · HTTP ${item.status} · ${item.duration_ms} ms · ${({completed:"完成",failed:"失败",unverified:"未确认完成",cancelled:"已取消",http_success:"接口已响应"})[item.result]||"仅HTTP记录"}${item.error_code ? " · "+item.error_code : ""}${item.route_label ? " · "+item.route_label : ""}`,
+        `${new Date(item.at).toLocaleTimeString()} · ${item.kind} · HTTP ${item.status} · ${item.duration_ms} ms · ${({completed:"完成",failed:"失败",unverified:"未确认完成",cancelled:"已取消",http_success:"接口已响应"})[item.result]||"仅HTTP记录"}${item.model && ["responses", "compact"].includes(item.endpoint) ? ` · 请求 ${item.model} → 上游 ${item.response_model || "未返回可识别模型"}${item.response_model && item.response_model !== item.model ? "（模型不一致）" : ""}` : ""}${item.error_code ? " · "+item.error_code : ""}${item.route_label ? " · "+item.route_label : ""}`,
         "hint",
       ),
     );
@@ -215,6 +229,7 @@ async function refreshStatus() {
       const detail = textNode("div", "", "session-detail");
       const heading = textNode("div", "", "session-heading");
       heading.append(textNode("strong", `会话 ${number} · ${session.model}`, "session-title"), textNode("span", "等待首次请求", "session-badge"));
+      heading.insertBefore(responseModelLine(session), heading.children[1]);
       detail.append(heading, textNode("p", "主用 0 · 备用 0 · 暂无失败记录", "session-empty"));
       row.append(detail);
       $("sessions").append(row);
@@ -237,6 +252,7 @@ async function refreshStatus() {
     const phaseNames = {ready:"主用未到期",search_queued:"等待采集",upstream_paused:"上游暂停",collecting:"正在采集",waiting_for_state:"等待主用",auth_blocked:"登录 / 权限异常",rate_limited:"上游限流"};
     heading.append(textNode("strong", `会话 ${number} · ${session.model}`, "session-title"), textNode("span", phaseNames[session.phase] || phases[session.phase] || session.phase, `session-badge ${session.usable ? "is-ready" : "is-pending"}`));
     heading.append(textNode("span", `目标 ${session.expected_length || "—"} · 备用 ${session.standby || 0}`, "session-meta"));
+    heading.insertBefore(responseModelLine(session), heading.children[1]);
     row.append(heading);
     const detail = textNode("details", "", "session-diagnostics");
     detail.dataset.sessionDetails = session.id;

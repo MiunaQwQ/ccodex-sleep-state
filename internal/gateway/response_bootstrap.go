@@ -68,6 +68,7 @@ func (b *failedBootstrapBody) Read([]byte) (int, error) { return 0, b.err }
 // still reach the client but cannot bootstrap a state.
 type bootstrapStream struct {
 	io.ReadCloser
+	responseModel             string
 	jsonMode                  bool
 	jsonData                  []byte
 	jsonOversized             bool
@@ -79,6 +80,7 @@ type bootstrapStream struct {
 
 func (b *bootstrapStream) inspect() {
 	if !b.oversized {
+		b.inspectResponseModel()
 		done, err := probeStreamOutcome(b.event)
 		b.completed = b.completed || done
 		if err != nil {
@@ -119,6 +121,9 @@ func (b *bootstrapStream) Read(p []byte) (int, error) {
 		b.inspect()
 		b.eof = true
 		if b.jsonMode && !b.jsonOversized {
+			if model := declaredResponseModel(b.jsonData, ""); model != "" {
+				b.responseModel = model
+			}
 			var response struct {
 				Object string          `json:"object"`
 				Status string          `json:"status"`

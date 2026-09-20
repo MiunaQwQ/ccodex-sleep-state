@@ -185,6 +185,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	responseValue := ""
 	var responseParseErr error
 	var responseStream *bootstrapStream
+	responseReceived := false
 	bootstrapResult := ""
 	route := e.fallbackRouteFor(s, time.Now())
 	if pinned := e.effectivePinnedRoute(); pinned != "" {
@@ -283,6 +284,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		},
 		Transport: transport, FlushInterval: -1, ErrorLog: log.New(io.Discard, "", 0),
 		ModifyResponse: func(resp *http.Response) error {
+			responseReceived = true
 			resp.Header.Del("Set-Cookie")
 			if e.settings().IsRelay() {
 				resp.Header.Del(turnstate.Header)
@@ -356,6 +358,9 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	tracked := &statusWriter{ResponseWriter: w, status: 200}
 	defer func() {
+		if responseStream != nil {
+			outcome.ResponseModel = responseStream.responseModel
+		}
 		if r.Context().Err() != nil {
 			outcome.Result = "cancelled"
 		} else if responseStream != nil {
@@ -366,6 +371,11 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					e.reject(s, failure.status, 0, route)
 				}
 			}
+		}
+		if generation {
+			s.mu.Lock()
+			s.lastResponse = &ResponseModelObservation{Model: outcome.ResponseModel, At: time.Now().UTC(), Endpoint: outcome.Kind, Result: outcome.Result, Received: responseReceived}
+			s.mu.Unlock()
 		}
 		if observeResponse && responseStream != nil {
 			if !responseStream.complete() {
@@ -416,7 +426,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			e.recordResponseCheck(s, checked, stateCheck, tracked.status, bootstrapResult)
 		}
-		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode)
+		e.log.Info("request_finished", "status", tracked.status, "duration_ms", time.Since(started).Milliseconds(), "route", e.routes[route].ID, "state_version", snapshot.Version, "model", s.model, "response_model", outcome.ResponseModel, "compaction", compact, "endpoint", outcome.Kind, "method", r.Method, "state_check", stateCheck, "result", outcome.Result, "error_code", outcome.ErrorCode)
 	}()
 	proxy.ServeHTTP(tracked, r)
 	if !stateBound && e.settings().PoolEnabled && generation && !compact && e.settings().EgressMode == "random" && e.settings().PinnedRoute == "" {

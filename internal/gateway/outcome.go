@@ -7,12 +7,13 @@ import (
 
 // Metadata shared with the local request history. Never stores response prose.
 type RequestOutcome struct {
-	Kind       string `json:"endpoint,omitempty"`
-	Result     string `json:"result,omitempty"`
-	ErrorCode  string `json:"error_code,omitempty"`
-	RouteID    string `json:"route_id,omitempty"`
-	RouteLabel string `json:"route_label,omitempty"`
-	Model      string `json:"model,omitempty"`
+	Kind          string `json:"endpoint,omitempty"`
+	Result        string `json:"result,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	RouteID       string `json:"route_id,omitempty"`
+	RouteLabel    string `json:"route_label,omitempty"`
+	Model         string `json:"model,omitempty"`
+	ResponseModel string `json:"response_model,omitempty"`
 }
 type outcomeKey struct{}
 

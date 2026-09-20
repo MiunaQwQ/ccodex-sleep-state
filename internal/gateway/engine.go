@@ -39,6 +39,7 @@ type credentialLimit struct {
 type session struct {
 	persistMu           sync.Mutex
 	lastStateCheck      ResponseStateCheck
+	lastResponse        *ResponseModelObservation
 	lastProbeResult     *NodeObservation
 	id                  string
 	model               string
@@ -817,24 +818,25 @@ func (e *Engine) Status() map[string]any {
 		ID string `json:"id"`
 		turnstate.Status
 		accountPolicy
-		Model                string             `json:"model"`
-		Diagnostic           string             `json:"diagnostic,omitempty"`
-		DiagnosticMessage    string             `json:"diagnostic_message,omitempty"`
-		ObservedBlocks       int                `json:"observed_blocks,omitempty"`
-		ObservedLength       int                `json:"observed_length,omitempty"`
-		CooldownSeconds      int                `json:"cooldown_seconds,omitempty"`
-		LastProbe            time.Time          `json:"last_probe,omitempty"`
-		Phase                string             `json:"phase"`
-		RejectedStatus       int                `json:"rejected_status,omitempty"`
-		RetryAfterSeconds    int                `json:"retry_after_seconds,omitempty"`
-		Nodes                []NodeObservation  `json:"nodes"`
-		Cards                []turnstate.Card   `json:"states"`
-		Collection           CollectionStatus   `json:"collection"`
-		LastStateCheck       ResponseStateCheck `json:"last_state_check"`
-		LastProbeResult      *NodeObservation   `json:"last_probe_result,omitempty"`
-		Events               []turnstate.Event  `json:"state_events"`
-		ActiveRoute          string             `json:"active_route,omitempty"`
-		UpstreamPauseSeconds int                `json:"upstream_pause_seconds,omitempty"`
+		Model                string                    `json:"model"`
+		LastResponse         *ResponseModelObservation `json:"last_response,omitempty"`
+		Diagnostic           string                    `json:"diagnostic,omitempty"`
+		DiagnosticMessage    string                    `json:"diagnostic_message,omitempty"`
+		ObservedBlocks       int                       `json:"observed_blocks,omitempty"`
+		ObservedLength       int                       `json:"observed_length,omitempty"`
+		CooldownSeconds      int                       `json:"cooldown_seconds,omitempty"`
+		LastProbe            time.Time                 `json:"last_probe,omitempty"`
+		Phase                string                    `json:"phase"`
+		RejectedStatus       int                       `json:"rejected_status,omitempty"`
+		RetryAfterSeconds    int                       `json:"retry_after_seconds,omitempty"`
+		Nodes                []NodeObservation         `json:"nodes"`
+		Cards                []turnstate.Card          `json:"states"`
+		Collection           CollectionStatus          `json:"collection"`
+		LastStateCheck       ResponseStateCheck        `json:"last_state_check"`
+		LastProbeResult      *NodeObservation          `json:"last_probe_result,omitempty"`
+		Events               []turnstate.Event         `json:"state_events"`
+		ActiveRoute          string                    `json:"active_route,omitempty"`
+		UpstreamPauseSeconds int                       `json:"upstream_pause_seconds,omitempty"`
 	}
 	states := make([]sessionStatus, 0, len(e.sessions))
 	for _, s := range e.sessions {
@@ -890,7 +892,7 @@ func (e *Engine) Status() map[string]any {
 		if collection.Reason == "pool_ready" {
 			cooldown = 0
 		}
-		states = append(states, sessionStatus{Events: s.state.Events(), LastStateCheck: s.lastStateCheck, LastProbeResult: s.lastProbeResult, Cards: e.cards(s, time.Now()), Collection: collection, Nodes: nodes, ActiveRoute: activeRoute, UpstreamPauseSeconds: max(0, int(time.Until(s.upstreamPause).Seconds())+1), ID: s.id, Status: state, accountPolicy: s.policy, Model: s.model, Phase: phase, RejectedStatus: status, RetryAfterSeconds: retry, Diagnostic: s.diagnostic, DiagnosticMessage: diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks), ObservedBlocks: s.observedBlocks, ObservedLength: observedLength, CooldownSeconds: cooldown, LastProbe: s.lastProbe})
+		states = append(states, sessionStatus{LastResponse: s.lastResponse, Events: s.state.Events(), LastStateCheck: s.lastStateCheck, LastProbeResult: s.lastProbeResult, Cards: e.cards(s, time.Now()), Collection: collection, Nodes: nodes, ActiveRoute: activeRoute, UpstreamPauseSeconds: max(0, int(time.Until(s.upstreamPause).Seconds())+1), ID: s.id, Status: state, accountPolicy: s.policy, Model: s.model, Phase: phase, RejectedStatus: status, RetryAfterSeconds: retry, Diagnostic: s.diagnostic, DiagnosticMessage: diagnosticMessage(s.diagnostic, s.policy, s.observedBlocks), ObservedBlocks: s.observedBlocks, ObservedLength: observedLength, CooldownSeconds: cooldown, LastProbe: s.lastProbe})
 		s.mu.Unlock()
 	}
 	modelOrder := map[string]int{}
