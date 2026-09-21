@@ -336,6 +336,7 @@ func (c *control) status() map[string]any {
 	}
 	result["timing"] = timingFrom(c.config)
 	result["timing_defaults"] = timingFrom(settings.Default())
+	result["automatic_collection_enabled"] = !c.config.Collection.AutomaticDisabled
 	result["traffic"] = c.history.snapshot()
 	if c.tests != nil {
 		result["node_tests"] = c.tests.snapshot()

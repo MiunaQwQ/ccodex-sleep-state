@@ -84,6 +84,17 @@ func (e *Engine) probeSchedule(s *session, now time.Time) CollectionStatus {
 // Caller holds s.mu. Automatic collection always respects local pacing.
 // Only an explicit one-shot manual action may skip it; hard gates still apply.
 func (e *Engine) collectionStatus(s *session, now time.Time) CollectionStatus {
+	if e.settings().Collection.AutomaticDisabled {
+		status := e.collection.Status(s.backupKey, now, e.settings().Collection)
+		status.NextAt = time.Time{}
+		status.Reason = "automatic_disabled"
+		status.WaitSeconds = 0
+		status.Idle = e.collectionIdleLocked(s, now)
+		if s.probing != nil {
+			status.Reason = "collecting"
+		}
+		return status
+	}
 	status := e.probeSchedule(s, now)
 	at, reason := e.collectionAt(s, now)
 	if at.IsZero() {

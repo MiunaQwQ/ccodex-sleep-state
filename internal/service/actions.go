@@ -245,7 +245,7 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.mu.Unlock()
-	if c.activeRequests.Load() > 0 && r.URL.Path != "/admin/api/timing" && r.URL.Path != "/admin/api/state-policy" && r.URL.Path != "/admin/api/pool/change" {
+	if c.activeRequests.Load() > 0 && r.URL.Path != "/admin/api/timing" && r.URL.Path != "/admin/api/automatic-collection" && r.URL.Path != "/admin/api/state-policy" && r.URL.Path != "/admin/api/pool/change" {
 		reply(w, 409, map[string]string{"error": "当前有 AI 请求，连接变更需等待；采集时间、节点状态和测试可随时操作"})
 		return
 	}
@@ -473,6 +473,31 @@ func (c *control) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(w, 200, map[string]string{"message": "采集设置已备份并保存，即刻生效，无需重启 Codex。没有重建节点或清空会话；新有效期或上限可能淘汰旧牌。采集预算和上游限流不会被重置。"})
+	case "/admin/api/automatic-collection":
+		var v struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := decode(w, r, &v); err != nil {
+			fail(err)
+			return
+		}
+		if v.Enabled == nil {
+			fail(errors.New("请明确选择开启或关闭自动打票"))
+			return
+		}
+		if c.rescue {
+			fail(errors.New("请先修复服务配置，再修改自动打票"))
+			return
+		}
+		if err := c.applyAutomaticCollection(*v.Enabled); err != nil {
+			fail(err)
+			return
+		}
+		message := "自动打票已关闭。已有主票、备用票、固定节点、等待时间和预算记录全部保留；后台不再自动补票，手动打票仍可使用。"
+		if *v.Enabled {
+			message = "自动打票已开启。将按当前固定节点、采集节奏和预算规则补票；已有主票与备用票保持不变。"
+		}
+		reply(w, 200, map[string]string{"message": message})
 	case "/admin/api/preferences":
 		var v struct {
 			Model         string `json:"model"`

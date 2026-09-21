@@ -43,7 +43,7 @@ function responseModelLine(session) {
 
 function readTiming() {
   return { ...Object.fromEntries(Object.entries(timingFields).map(([key, id]) => [key, Number($(id).value)])),
-    collection: {cadence:$("collection-cadence").value, ...Object.fromEntries(Object.entries(collectionFields).map(([key, id]) => [key, Number($(id).value)]))} };
+    collection: {automatic_disabled:!$("automatic-collection").checked, cadence:$("collection-cadence").value, ...Object.fromEntries(Object.entries(collectionFields).map(([key, id]) => [key, Number($(id).value)]))} };
 }
 function timingSummary() {
   const t = readTiming();
@@ -54,10 +54,14 @@ function timingSummary() {
   $("failure-max-interval").setCustomValidity(c.failure_max_interval_seconds < c.failure_interval_seconds ? "最大间隔不得小于初始间隔" : "");
   const retryStart = c.failure_interval_seconds === 0 ? "首次失败立即重试一次，此后从 30 秒起翻倍等待" : `失败从 ${c.failure_interval_seconds} 秒起翻倍等待`;
   const cadence = round ? `默认轮次：每批最多尝试 ${t.max_probes_per_round} 个节点，单次最长 ${t.probe_timeout_seconds} 秒；不论有无主用，每批结束后等待 ${t.probe_cooldown_seconds} 秒；可手动随机换节点立即采集一次；节点每轮随机排序，不重复，全部可用节点走完后才开启下一轮。不叠加逐次退避和连续失败暂停。` : `${retryStart}，最多 ${c.failure_max_interval_seconds} 秒；连续失败 ${c.search_budget} 次暂停 ${c.search_pause_seconds} 秒。`;
-  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}${cadence}所有会话自动采集合计滚动一小时最多 ${c.hourly_budget} 次；手动打票无等待且不占用此预算；登录拒绝或限流会暂停；模型容量不足继续下一节点。备用目标 ${c.standby_target} 张，主用加备用达到 ${c.standby_target+1} 张后停止；按取得顺序使用，出现空位才补。按轮次及至少 ${c.standby_spacing_seconds} 秒的错峰间隔补充后续备用；聊天期间也按上述节奏补采；无 AI 在途请求且空闲 ${c.idle_seconds} 秒后暂停，面板与模型列表不延长计时。`;
+  const behavior = c.automatic_disabled
+    ? "自动打票已关闭。后台不会因缺主票、缺备用、到期、失败或新请求而采集；已有票、固定节点、等待时间和预算记录保留，手动打票仍可使用。"
+    : `${cadence}所有会话自动采集合计滚动一小时最多 ${c.hourly_budget} 次；手动打票无等待且不占用此预算；登录拒绝或限流会暂停；模型容量不足继续下一节点。备用目标 ${c.standby_target} 张，主用加备用达到 ${c.standby_target+1} 张后停止；按取得顺序使用，出现空位才补。按轮次及至少 ${c.standby_spacing_seconds} 秒的错峰间隔补充后续备用；聊天期间也按上述节奏补采；无 AI 在途请求且空闲 ${c.idle_seconds} 秒后暂停，面板与模型列表不延长计时。`;
+  $("timing-summary").textContent = `${timingDirty ? "尚未保存 · " : "已保存 · "}${behavior}`;
 }
 function fillTiming(t) {
   if (!t) return;
+  $("automatic-collection").checked = !t.collection?.automatic_disabled;
   $("collection-cadence").value = t.collection?.cadence || "backoff";
   for (const [key, id] of Object.entries(timingFields)) $(id).value = t[key];
   for (const [key, id] of Object.entries(collectionFields)) $(id).value = t.collection?.[key] ?? "";
@@ -191,6 +195,12 @@ async function refreshStatus() {
     (state.injection_enabled
       ? "注入已开启，是否已有可用 state 请看模型票池状态。"
       : "注入已关闭，不采集或替换 state。");
+  const automaticCollectionEnabled = state.automatic_collection_enabled !== false;
+  $("automatic-collection-toggle").setAttribute("aria-checked", String(automaticCollectionEnabled));
+  $("automatic-collection-toggle").textContent = automaticCollectionEnabled ? "已开启" : "已关闭";
+  $("automatic-collection-help").textContent = automaticCollectionEnabled
+    ? "后台会按当前固定节点、采集节奏和预算补票；已有主票与备用票按原规则保留。"
+    : "自动打票已关闭。已有主票、备用票和固定节点保持不变；后台不再补票，手动打票仍可用。";
   for (const id of ["recover", "inspect-recovery"])
     $(id).disabled = !state.configuration_writable;
   if (!preferencesDirty && document.activeElement?.id !== "model-select")
@@ -386,7 +396,7 @@ async function refreshStatus() {
 	} else detail.append(textNode("p", "最近正式回复的 state 检查：尚无记录", "hint"));
     if (session.collection) {
       const c = session.collection;
-      const reasons = {pool_ready:"已满额，自动采集已停止；按取得顺序使用，出现空位才补", missing_active:"没有主用，继续寻找剩余节点", missing_standby:"准备补第一张备用", standby_spacing:"备用错峰等待", standby_refresh:"等待更新最早到期的备用", refresh_active:"等待更新主用", success_cooldown:"成功后冷却", upstream_pause:"上游要求暂停采集", failure_interval:"失败后退避", search_budget:"连续失败预算暂停", hourly_budget:"每小时总预算暂停", idle:"空闲暂停，收到新请求后恢复", budget_storage_error:"预算记录异常，额外采集停止"};
+      const reasons = {pool_ready:"已满额，自动采集已停止；按取得顺序使用，出现空位才补", automatic_disabled:"自动打票已关闭；已有票和固定节点保持不变，手动打票仍可用", missing_active:"没有主用，继续寻找剩余节点", missing_standby:"准备补第一张备用", standby_spacing:"备用错峰等待", standby_refresh:"等待更新最早到期的备用", refresh_active:"等待更新主用", success_cooldown:"成功后冷却", upstream_pause:"上游要求暂停采集", failure_interval:"失败后退避", search_budget:"连续失败预算暂停", hourly_budget:"每小时总预算暂停", idle:"空闲暂停，收到新请求后恢复", budget_storage_error:"预算记录异常，额外采集停止"};
       const failureNames = {shape_mismatch:"state 长度不符合", state_time_rejected:"state 过期或时间异常", duplicate_state:"返回重复 state", network_failed:"连接失败或超时", missing_state_header:"未返回 state", invalid_state_envelope:"state 格式错误", incomplete_response:"回复未完整结束", upstream_rejected:"上游拒绝", model_capacity:"模型容量不足", upstream_rate_limited:"上游限流", response_failed:"上游回复失败"};
       if (c.last_failure_at && !c.last_failure_at.startsWith("0001")) {
         const brief = textNode("p", "最近补采失败：", "session-failure");
@@ -439,7 +449,7 @@ async function refreshStatus() {
       row.append(randomOnce);
       const retry = textNode(
         "button",
-        session.collection?.reason==="pool_ready" ? "主备已满 · 停止采集" : session.cooldown_seconds > 0
+        session.collection?.reason==="pool_ready" ? "主备已满 · 停止采集" : session.collection?.reason==="automatic_disabled" ? "手动重新采集" : session.cooldown_seconds > 0
           ? `${session.cooldown_seconds} 秒后可采集`
           : "重新采集",
         "secondary",
@@ -457,7 +467,9 @@ async function refreshStatus() {
         action(async () => {
           if (
             !confirm(
-              `重新采集会使用此票池的账号和模型，失败会按间隔和预算自动补采，会消耗额度；登录失效或上游限流时暂停。继续？`,
+              session.collection?.reason === "automatic_disabled"
+                ? `手动重新采集只尝试一次，不会开启自动打票；已有主票和备用票保持不变。继续？`
+                : `重新采集会使用此票池的账号和模型，失败会按间隔和预算自动补采，会消耗额度；登录失效或上游限流时暂停。继续？`,
             )
           )
             return;
@@ -522,6 +534,14 @@ $("toggle").addEventListener("click", () =>
     const result = await api("injection", {
       enabled: !state.injection_enabled,
     });
+    notice(result.message);
+    await refresh();
+  }),
+);
+$("automatic-collection-toggle").addEventListener("click", () =>
+  action(async () => {
+    const enabled = state?.automatic_collection_enabled === false;
+    const result = await api("automatic-collection", { enabled });
     notice(result.message);
     await refresh();
   }),
@@ -852,17 +872,19 @@ for (const id of ["model-select", "account-select", "fallback-select"])
     preferencesDirty = true;
   });
 
-for (const id of ["collection-cadence", ...Object.values(timingFields), ...Object.values(collectionFields)]) {
+for (const id of ["automatic-collection", "collection-cadence", ...Object.values(timingFields), ...Object.values(collectionFields)]) {
   $(id).addEventListener("input", () => { timingDirty = true; timingSummary(); });
 }
 $("timing-defaults").addEventListener("click", () => {
   if (!state) return;
-  timingDirty = true; fillTiming(state.timing_defaults);
+  const automaticDisabled = readTiming().collection.automatic_disabled;
+  timingDirty = true; fillTiming({ ...state.timing_defaults, collection: { ...state.timing_defaults.collection, automatic_disabled: automaticDisabled } });
 });
 $("timing-low-frequency").addEventListener("click", () => {
   if (!state) return;
+  const automaticDisabled = readTiming().collection.automatic_disabled;
   timingDirty = true;
-  fillTiming({ ...state.timing_defaults, probe_cooldown_seconds: 600, max_probes_per_round: 2 });
+  fillTiming({ ...state.timing_defaults, collection: { ...state.timing_defaults.collection, automatic_disabled: automaticDisabled }, probe_cooldown_seconds: 600, max_probes_per_round: 2 });
 });
 $("timing-cancel").addEventListener("click", () => {
   if (!state) return;
@@ -873,7 +895,9 @@ $("timing-form").addEventListener("submit", (event) => {
   timingSummary();
   if (!$("timing-form").reportValidity()) return;
   const next = readTiming();
-  if (!confirm("保存采集设置？旧配置会备份，现有 state 和连接保留，预算不重置。无需重启 Codex；有效期或备用上限变更可能淘汰部分 state。")) return;
+  if (!confirm(next.collection.automatic_disabled
+    ? "关闭自动打票并保存采集设置？已有票、固定节点、等待时间和预算记录保留；后台不再补票，手动打票仍可用。"
+    : "开启自动打票并保存采集设置？旧配置会备份，现有 state 和连接保留，预算不重置。")) return;
   action(async () => {
     const result = await api("timing", next);
     // Do not discard edits typed while the save request was in flight.

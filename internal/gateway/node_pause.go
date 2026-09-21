@@ -23,10 +23,28 @@ func (e *Engine) otherEligibleRouteLocked(s *session, current int, now time.Time
 }
 
 func (e *Engine) effectivePinnedRoute() string {
-	if e.pool.Get(e.settings().PinnedRoute).State == "failed" {
-		return ""
+	if pinned := e.settings().PinnedRoute; pinned != "" {
+		return pinned
 	}
-	return e.settings().PinnedRoute
+	if e.settings().EgressMode == "fixed" {
+		return e.settings().EgressRoute
+	}
+	return ""
+}
+
+// fixedRoute reports whether a route is explicitly selected by the user. A
+// fixed route may be backed by another machine whose own proxy pool changes;
+// a transient connection failure must not mark it failed or move traffic to a
+// different local route.
+func (e *Engine) fixedRoute(route int) bool {
+	if route < 0 || route >= len(e.routes) {
+		return false
+	}
+	pinned := e.settings().PinnedRoute
+	if pinned == "" && e.settings().EgressMode == "fixed" {
+		pinned = e.settings().EgressRoute
+	}
+	return pinned != "" && e.routes[route].ID == pinned
 }
 
 func (e *Engine) pauseMismatchedRoute(s *session, route, blocks int, now time.Time, requestStarted ...time.Time) {
@@ -66,6 +84,10 @@ func (e *Engine) pauseMismatchedRoute(s *session, route, blocks int, now time.Ti
 // network failure is not state invalidation. A completed 11-block probe never
 // calls this function.
 func (e *Engine) failRoute(route int) {
+	if e.fixedRoute(route) {
+		e.log.Info("fixed_node_failure_retained", "route", e.routes[route].ID, "reason", "network_failed")
+		return
+	}
 	_ = e.pool.FinishProbe(e.routes[route].ID, "failed", "network_failed")
 	e.mu.Lock()
 	for _, s := range e.sessions {
@@ -84,6 +106,14 @@ func (e *Engine) failRoute(route int) {
 func (e *Engine) fallbackRouteFor(s *session, now time.Time) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if pinned := e.effectivePinnedRoute(); pinned != "" {
+		for i, route := range e.routes {
+			if route.ID == pinned {
+				s.fallbackRoute = i
+				return i
+			}
+		}
+	}
 	current := s.fallbackRoute
 	state := e.pool.Get(e.routes[current].ID).State
 	if now.Before(s.nodePauses[current]) || state == "disabled" || state == "failed" {
@@ -95,6 +125,9 @@ func (e *Engine) fallbackRouteFor(s *session, now time.Time) int {
 }
 
 func (e *Engine) advanceUnavailableRoute(s *session, route int, now time.Time) {
+	if e.fixedRoute(route) {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if next := e.otherEligibleRouteLocked(s, route, now); next >= 0 {

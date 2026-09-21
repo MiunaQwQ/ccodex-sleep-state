@@ -169,11 +169,11 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	e.syncRoutes(s, time.Now())
 	snapshot, usable := s.state.Acquire(time.Now())
-	if inject && !usable {
+	if inject && !usable && !e.settings().Collection.AutomaticDisabled {
 		if e.running.Load() {
 			e.signal()
 		} else {
-			e.refresh(r.Context(), s, true)
+			e.refreshAutomatic(r.Context(), s, true)
 		}
 		snapshot, usable = s.state.Acquire(time.Now())
 		e.signal()
@@ -193,7 +193,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, 503, "state_unavailable", message)
 		return
 	}
-	bootstrapResponse := observeResponse && !inject
+	// When automatic ticketing is disabled, a normal fallback response is
+	// forwarded but must not silently become a new ticket. Explicit manual
+	// collection remains available through the panel.
+	bootstrapResponse := observeResponse && !inject && !e.settings().Collection.AutomaticDisabled
 	var responseToken turnstate.Token
 	responseValue := ""
 	var responseParseErr error
@@ -234,7 +237,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// metadata requests, not just to new state probes.
 	poolEntry := e.pool.Get(e.routes[route].ID)
 	boundCard := (inject || compact) && usable && route == snapshot.Route
-	if poolEntry.State == "disabled" || (poolEntry.State == "failed" && !(boundCard && poolEntry.Reason == "network_failed")) {
+	if poolEntry.State == "disabled" || (poolEntry.State == "failed" && !e.fixedRoute(route) && !(boundCard && poolEntry.Reason == "network_failed")) {
 		fail(w, 503, "pool_node_disabled", "所选出口已停用，请在代理池手动放回或选择其他出口")
 		return
 	}

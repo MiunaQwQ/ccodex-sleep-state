@@ -176,3 +176,26 @@ func (c *control) applyTiming(t timingPreferences) error {
 	}
 	return nil
 }
+
+// applyAutomaticCollection changes only the scheduler switch. It keeps the
+// live engine, routes, sessions, tickets, timers and persisted budget intact.
+func (c *control) applyAutomaticCollection(enabled bool) error {
+	if c.managed {
+		if err := c.checkManaged(); err != nil {
+			return errors.New("Codex 连接已改变，请先检查与修复配置")
+		}
+	}
+	next := c.config
+	next.Collection.AutomaticDisabled = !enabled
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	if err := c.persist(next); err != nil {
+		return err
+	}
+	c.config = next
+	if c.engine != nil {
+		c.engine.UpdateTiming(next)
+	}
+	return nil
+}

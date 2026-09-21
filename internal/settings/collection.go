@@ -7,6 +7,10 @@ import (
 
 // CollectionPolicy applies only to additional state probes, not user requests.
 type CollectionPolicy struct {
+	// AutomaticDisabled stops all background and request-triggered collection.
+	// A missing field remains enabled for backwards compatibility with older
+	// configuration files.
+	AutomaticDisabled         bool   `json:"automatic_disabled,omitempty"`
 	Cadence                   string `json:"cadence"`
 	StandbyTarget             int    `json:"standby_target"`
 	StandbySpacingSeconds     int    `json:"standby_spacing_seconds"`

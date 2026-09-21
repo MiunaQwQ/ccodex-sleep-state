@@ -15,7 +15,7 @@
       <div class="brand">
         <span class="mark" aria-hidden="true">S</span>
         <div>
-          <strong>Sleep State</strong><small>本地连接管理 · r22</small>
+          <strong>Sleep State</strong><small>本地连接管理 · r23</small>
         </div>
       </div>
       <span class="local"><i></i> 本机私有</span
@@ -60,7 +60,7 @@
           <section class="session-section"><div class="section-heading"><div><h2>模型票池</h2><p>同账号、同模型的对话共用主票与备用票</p></div><span class="subtle-label">Astra · Sol · Terra</span></div><div id="sessions" class="stack"></div></section>
           <div class="overview-controls">
             <section class="card injection-card"><div class="row"><div><h2>State 注入</h2><p>使用当前主牌与它的当前节点</p></div><button id="toggle" class="ios-switch" role="switch" aria-checked="false" aria-label="State 注入">读取中…</button></div><p id="injection-help" class="hint">正在读取注入状态…</p><details class="inline-help"><summary>关闭后会怎样</summary><p class="hint">关闭后仍通过所选出口转发，但不再采集或替换 state。正在进行的回复不会被打断，上游登录、权限及限流规则仍然生效。</p></details></section>
-            <section class="card policy-card"><h2>主用策略</h2><p>选择主牌的更新方式</p><div class="inline-form"><select id="state-policy" aria-label="主用策略"><option value="on_demand">固定主用 · 到期再换</option><option value="standby">主用与备用 · 按序接替</option></select><button id="save-state-policy" class="secondary">保存</button></div><p class="hint">备用数量和补采节奏可在连接设置中调整。</p><p id="state-policy-result" role="status"></p></section>
+            <section class="card policy-card"><div class="row"><div><h2>自动打票</h2><p>缺票、到期或出现空位时后台补票</p></div><button id="automatic-collection-toggle" class="ios-switch" role="switch" aria-checked="true" aria-label="自动打票">读取中…</button></div><p id="automatic-collection-help" class="hint">正在读取自动打票状态…</p><div class="policy-divider"></div><h2>主用策略</h2><p>选择主牌的更新方式</p><div class="inline-form"><select id="state-policy" aria-label="主用策略"><option value="on_demand">固定主用 · 到期再换</option><option value="standby">主用与备用 · 按序接替</option></select><button id="save-state-policy" class="secondary">保存</button></div><p class="hint">备用数量和补采节奏可在连接设置中调整。</p><p id="state-policy-result" role="status"></p></section>
           </div>
           <section class="conversation-section"><div class="section-heading"><div><h2>对话请求</h2><p id="conversation-summary">等待请求…</p></div></div><p class="hint">空闲 10 分钟后自动移出页面，也可点击 × 手动移除。有新请求时重新出现，票池不受影响。展开卡片可看请求明细。</p><div id="conversations" class="stack"></div></section>
           <details class="card request-history"><summary><span>最近请求</span><span id="traffic-summary" class="hint"></span></summary><p id="request-slots" class="hint"></p><div id="recent-requests" class="stack"></div></details>
@@ -126,6 +126,7 @@
             <h2>采集时间与次数</h2>
             <p>不确定就用默认值。这里控制本地采集，不改变套餐额度、官方限流或上游 state 的真实寿命。关闭注入或使用中转时，这些设置不触发采集。</p>
             <form id="timing-form">
+              <label class="collection-master"><input id="automatic-collection" type="checkbox" checked /><span><strong>开启自动打票</strong><small>关闭后立即停止后台定时、缺票、到期和失败补采。已有主票、备用票、固定节点、预算与等待记录不变；手动打票仍可使用。</small></span></label>
               <label for="collection-cadence">采集节奏</label>
               <select id="collection-cadence"><option value="round">默认轮次：每批结束后等待</option><option value="backoff">逐次退避：每次失败后等待</option></select>
               <div class="settings-grid">
@@ -326,7 +327,7 @@
               <label for="subscription-lines">手动输入／粘贴订阅链接（一行一个，含凭据请勿截图）</label><textarea id="subscription-lines" rows="5" required spellcheck="false" placeholder="https://…、sub://…、节点链接或 Shadowrocket 订阅 JSON"></textarea><p class="hint">自动识别订阅、sub://、节点链接和小火箭订阅 JSON；先检查可预览合并后的节点。</p>
               <label for="subscription-exclude">排除地区关键词</label><input id="subscription-exclude" value="香港,台湾,台灣,Hong Kong,Taiwan,🇭🇰,🇹🇼" /><label><input id="subscription-append" type="checkbox" checked /> 追加到现有来源（不勾选则替换）</label>
               <label><input id="subscription-enable-pool" type="checkbox" checked /> 导入后加入代理池并自动轮换（追加时保留固定节点）</label>
-              <p class="hint">固定节点正常时持续使用；连接失败后停止使用并尝试其它候选，手动恢复后才能再用。取消固定后按已勾选节点轮询。</p>
+              <p class="hint">固定节点始终锁定同一入口；连接失败也不会停用或切换，可在另一台代理设备中自行更换它的上游节点。取消固定后才按已勾选节点轮询。</p>
               <button type="button" id="test-pool-import" class="secondary">先检查所有订阅</button><button type="submit">备份并导入代理池</button>
               <p id="pool-import-result" role="status"></p>
             </form>
@@ -338,7 +339,7 @@
           <p class="eyebrow">路由</p>
           <h1>节点池</h1>
           <p class="lead">
-            勾选后加入代理池；固定节点会一直使用它，取消固定后自动轮换。state 以主用＋多张备用牌保存，一张失效立即切换下一张；连接失败或超时的节点停止使用，须手动恢复；补采返回 11 不会删除已有主备。
+            勾选后加入代理池；固定节点会一直使用它，连接失败也不切换本地节点，取消固定后才自动轮换。非固定节点连接失败或超时会停止自动使用，须手动恢复；state 以主用＋多张备用牌保存，一张失效立即切换下一张；补采返回 11 不会删除已有主备。
           </p>
           <div id="node-toolbar" class="node-toolbar"><div class="actions"><button id="save-selection">保存勾选</button><button id="load-routes" class="secondary">刷新列表</button><button id="auto-route" class="quiet">全选</button><button id="reload-pool" class="quiet">更新订阅</button></div><p id="selection-summary" class="hint"></p></div>
           <details class="card latency-panel"><summary><span>延迟与连通性测试</span><span id="node-test-progress" class="hint" role="status">尚未开始</span></summary><p class="hint">按所选目标分别测量 HTTPS 响应耗时，包含连接与 TLS；Google 须返回 2xx，上游 401 只代表可达。可选 IP 检测通过该节点访问 ipify；不发送模型请求。</p><div class="test-toolbar"><div class="actions"><button id="test-all-nodes">测试全部</button><button id="test-selected-nodes" class="secondary">测试已勾选</button><button id="retest-failed-nodes" class="secondary">复测并恢复通过的失败节点</button><button id="stop-node-tests" class="quiet">停止</button></div><label for="node-test-target">检测目标<select id="node-test-target"><option value="both">Google + OpenAI</option><option value="upstream">仅 OpenAI / 当前上游</option><option value="google">仅 Google</option></select></label><label><input id="node-test-exit" type="checkbox" /> 同时记录实际出口 IP</label><label for="node-test-timeout">单项超时（秒）<input id="node-test-timeout" type="number" value="6" min="1" max="30" /></label></div><div class="actions"><button id="select-reachable" class="secondary">仅勾选通过的节点</button><button id="sort-latency" class="secondary">按延迟排序</button></div></details>
@@ -410,7 +411,7 @@
     </div>
     <div id="notice" role="status" aria-live="polite" hidden></div>
     <footer>
-      Sleep State · 本地管理 · r22
+      Sleep State · 本地管理 · r23
     </footer>
   <dialog id="route-switch-dialog" class="route-switch-dialog"><form id="route-switch-form"><h2>保留主票，切换节点</h2><p id="switch-ticket-label"></p><p id="switch-current-route" class="hint"></p><label for="switch-route-select">后续带票请求使用的节点</label><select id="switch-route-select" required></select><p class="hint">此账号、此模型共用的主票会一起切换。票号、有效期和备用票保留，在途请求继续使用原节点。跨节点后是否可用，以实际请求返回为准；切换本身不会发送测试请求。</p><p id="switch-route-result" class="traffic-error" role="status"></p><div class="actions"><button type="button" id="cancel-route-switch" class="quiet">取消</button><button type="submit" id="confirm-route-switch">保留主票并切换</button></div></form></dialog>
   </body>

@@ -261,7 +261,7 @@ func (e *Engine) Run(ctx context.Context) {
 			lastProbe := s.lastProbe
 			s.mu.Unlock()
 			if ctx.Err() == nil && e.needsCollection(s, time.Now()) && e.hasProbeCandidate() {
-				e.refresh(ctx, s, false)
+				e.refreshAutomatic(ctx, s, false)
 			}
 			releaseWork(s)
 			// Wake immediately only when another probe is due. Failed attempts are
@@ -286,6 +286,9 @@ func (e *Engine) Run(ctx context.Context) {
 func releaseWork(s *session) { s.mu.Lock(); s.busy--; s.queued = false; s.mu.Unlock() }
 
 func (e *Engine) needsCollection(s *session, now time.Time) bool {
+	if e.settings().Collection.AutomaticDisabled {
+		return false
+	}
 	at, _ := e.collectionAt(s, now)
 	return !at.IsZero() && !now.Before(at)
 }
@@ -306,12 +309,12 @@ func (e *Engine) hasProbeCandidate() bool {
 		return false
 	}
 	pinned := e.effectivePinnedRoute()
-	for _, route := range e.routes {
+	for i, route := range e.routes {
 		if pinned != "" && pinned != route.ID {
 			continue
 		}
 		state := e.pool.Get(route.ID).State
-		if state != "disabled" && state != "failed" && (pinned != "" || !e.settings().PoolEnabled || state == "available") {
+		if state != "disabled" && (state != "failed" || e.fixedRoute(i)) && (pinned != "" || !e.settings().PoolEnabled || state == "available") {
 			return true
 		}
 	}
@@ -331,6 +334,7 @@ func (e *Engine) signal() {
 func (e *Engine) backgroundWork(now time.Time) []*session {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	automatic := !e.settings().Collection.AutomaticDisabled
 	var work []*session
 	for key, s := range e.sessions {
 		s.mu.Lock()
@@ -338,7 +342,7 @@ func (e *Engine) backgroundWork(now time.Time) []*session {
 		available := s.probing == nil && !s.queued
 		if idle && available && s.busy == 0 {
 			delete(e.sessions, key)
-		} else if !e.collectionIdleLocked(s, now) && available && s.activated {
+		} else if automatic && !e.collectionIdleLocked(s, now) && available && s.activated {
 			s.busy++
 			s.queued = true
 			work = append(work, s)
@@ -364,12 +368,23 @@ func (e *Engine) backgroundWork(now time.Time) []*session {
 }
 
 func (e *Engine) refresh(ctx context.Context, s *session, bootstrap bool, only ...int) {
-	e.refreshOnce(ctx, s, bootstrap, false, only...)
+	e.refreshOnceMode(ctx, s, bootstrap, false, false, only...)
+}
+
+// refreshAutomatic is used only by the scheduler and request bootstrap. It is
+// kept separate from refresh so an explicit panel action can still collect a
+// ticket while automatic collection is disabled.
+func (e *Engine) refreshAutomatic(ctx context.Context, s *session, bootstrap bool, only ...int) {
+	e.refreshOnceMode(ctx, s, bootstrap, false, true, only...)
 }
 
 func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualRandom bool, only ...int) {
+	e.refreshOnceMode(ctx, s, bootstrap, manualRandom, false, only...)
+}
+
+func (e *Engine) refreshOnceMode(ctx context.Context, s *session, bootstrap, manualRandom, automatic bool, only ...int) {
 	epoch := e.injectionEpoch.Load()
-	if e.disabled.Load() || e.pool.Err() != nil || (e.settings().PoolEnabled && e.statePoolReady(s, time.Now())) {
+	if e.disabled.Load() || e.pool.Err() != nil || (automatic && e.settings().Collection.AutomaticDisabled) || (e.settings().PoolEnabled && e.statePoolReady(s, time.Now())) {
 		return
 	}
 	s.mu.Lock()
@@ -435,7 +450,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		// Foreground generations do not cancel a probe round. Finish the
 		// already-dispatched probe and continue to the next selected node;
 		// probeSlot, the account guard and the persisted budget remain active.
-		if ctx.Err() != nil || e.disabled.Load() || e.injectionEpoch.Load() != epoch || (e.settings().PoolEnabled && e.statePoolReady(s, time.Now())) {
+		if ctx.Err() != nil || e.disabled.Load() || (automatic && e.settings().Collection.AutomaticDisabled) || e.injectionEpoch.Load() != epoch || (e.settings().PoolEnabled && e.statePoolReady(s, time.Now())) {
 			return
 		}
 		s.mu.Lock()
@@ -475,7 +490,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		if e.settings().PoolEnabled && len(only) == 0 && pinned < 0 && entry.State != "available" {
 			continue
 		}
-		if entry.State == "disabled" || entry.State == "failed" {
+		if entry.State == "disabled" || (entry.State == "failed" && !e.fixedRoute(route)) {
 			continue
 		}
 		seekingActive = seekingActive || e.seekingActive(s, time.Now())
@@ -515,7 +530,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 		}
 		if errors.Is(err, errProbeTransport) {
 			e.failRoute(route)
-			if len(only) == 0 && pinned == route {
+			if len(only) == 0 && pinned == route && !e.fixedRoute(route) {
 				pinned = -1
 				limit = min(e.settings().MaxProbes, len(e.routes))
 			}
@@ -576,7 +591,7 @@ func (e *Engine) refreshOnce(ctx context.Context, s *session, bootstrap, manualR
 			// dead link for this run: remove it from automatic rotation until the
 			// user explicitly puts it back from the node list.
 			poolState := "available"
-			if result == "network_failed" {
+			if result == "network_failed" && !e.fixedRoute(route) {
 				poolState = "failed"
 			}
 			if err := e.pool.FinishProbe(e.routes[route].ID, poolState, result); err != nil {
@@ -864,6 +879,8 @@ func (e *Engine) Status() map[string]any {
 			phase = "passthrough"
 		case state.Usable:
 			phase = "ready"
+		case e.settings().Collection.AutomaticDisabled:
+			phase = "waiting_for_state"
 		default:
 			s.mu.Lock()
 			if time.Now().Before(s.upstreamPause) {
@@ -993,6 +1010,8 @@ func probeReason(err error) string {
 }
 func diagnosticMessage(code string, p accountPolicy, observed int) string {
 	switch code {
+	case "automatic_disabled":
+		return "自动打票已关闭；已有主票和备用票保持不变。需要新票时请在面板手动打票。"
 	case "duplicate_state":
 		return "上游返回已持有的同一张 state，没有增加备用；按失败间隔等待后再补采。"
 	case "failure_interval":
@@ -1042,6 +1061,9 @@ func diagnosticMessage(code string, p accountPolicy, observed int) string {
 func (e *Engine) unavailableMessage(s *session) (string, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if e.settings().Collection.AutomaticDisabled {
+		return "自动打票已关闭，当前没有可用主票；请在面板手动打票，或将回退模式改为普通转发。", 1
+	}
 	schedule := e.probeSchedule(s, time.Now())
 	seconds := max(1, schedule.WaitSeconds)
 	diagnostic := s.diagnostic

@@ -32,16 +32,6 @@ func (e *Engine) selectEgressFor(harvest int, hasState, allowUsed bool) (int, er
 		for i, r := range e.routes {
 			if r.ID == e.settings().EgressRoute {
 				state := e.pool.Get(r.ID).State
-				if state == "failed" {
-					for offset := 1; offset < len(e.routes); offset++ {
-						next := (i + offset) % len(e.routes)
-						st := e.pool.Get(e.routes[next].ID).State
-						if st != "failed" && st != "disabled" {
-							return next, nil
-						}
-					}
-					return 0, errors.New("固定出口连接失败，且没有其它可用节点；请手动恢复或增加节点")
-				}
 				if state == "disabled" {
 					return 0, errors.New("固定出口已停用，请先取消停用或选择其它节点")
 				}

@@ -48,6 +48,42 @@ func TestTimingPreferencesPersistAndPreserveOtherSettings(t *testing.T) {
 	}
 }
 
+func TestAutomaticCollectionTogglePersistsWithoutRebuildingEngine(t *testing.T) {
+	c, h := panelControl(t, func(cfg *settings.Config) {
+		cfg.Model = "gpt-5.6-sol"
+		cfg.Collection.HourlyBudget = 17
+	})
+	engine := c.engine
+	c.activeRequests.Store(1) // The switch is safe while a reply is in flight.
+	w := panelPost(h, "automatic-collection", `{"enabled":false}`)
+	if w.Code != 200 {
+		t.Fatalf("disable: %d %s", w.Code, w.Body.String())
+	}
+	if c.engine != engine || !c.config.Collection.AutomaticDisabled || c.config.Collection.HourlyBudget != 17 {
+		t.Fatal("toggle rebuilt the engine or changed unrelated collection settings")
+	}
+	disk, err := settings.Load(c.path)
+	if err != nil || !disk.Collection.AutomaticDisabled || disk.Collection.HourlyBudget != 17 {
+		t.Fatalf("disabled setting was not persisted: %+v %v", disk, err)
+	}
+	status := c.status()
+	if status["automatic_collection_enabled"] != false || timingFrom(c.config).Collection.AutomaticDisabled != true {
+		t.Fatalf("status did not expose disabled state: %+v", status)
+	}
+	if w = panelPost(h, "automatic-collection", `{"enabled":true}`); w.Code != 200 {
+		t.Fatalf("enable: %d %s", w.Code, w.Body.String())
+	}
+	if c.config.Collection.AutomaticDisabled {
+		t.Fatal("enabled setting was not applied")
+	}
+	if disk, err = settings.Load(c.path); err != nil || disk.Collection.AutomaticDisabled {
+		t.Fatalf("enabled setting was not persisted: %+v %v", disk, err)
+	}
+	if w = panelPost(h, "automatic-collection", `{}`); w.Code != 400 {
+		t.Fatalf("missing explicit switch value accepted: %d", w.Code)
+	}
+}
+
 func TestTimingRejectsInvalidWithoutWriting(t *testing.T) {
 	for _, body := range []string{
 		`{}`, `null`,

@@ -139,7 +139,7 @@ func TestRoundStopsAtIdleBoundaryBeforeNextNode(t *testing.T) {
 	}
 }
 
-func TestTimeoutFailsNodeUntilManualRecoveryAndContinuesPinnedRound(t *testing.T) {
+func TestTimeoutKeepsFixedNodeAndDoesNotSwitchToAnotherRoute(t *testing.T) {
 	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { complete(w, fakeToken(10, 231)) }))
 	e.config.PoolEnabled = true
 	e.config.Collection = settings.DefaultCollection()
@@ -157,23 +157,54 @@ func TestTimeoutFailsNodeUntilManualRecoveryAndContinuesPinnedRound(t *testing.T
 	defer release(s)
 	e.refresh(context.Background(), s, false)
 	active, ok := s.state.Acquire(time.Now())
-	if !ok || active.Route != 1 || brokenCalls.Load() != 1 {
-		t.Fatal("failed fixed node did not advance to healthy exit")
+	if ok || active.Token.Value != "" || brokenCalls.Load() != 1 {
+		t.Fatal("failed fixed node switched to a healthy exit")
 	}
-	if e.pool.Get(e.routes[0].ID).State != "failed" {
-		t.Fatal("failure not retained")
+	if e.pool.Get(e.routes[0].ID).State != "available" || e.effectivePinnedRoute() != e.routes[0].ID {
+		t.Fatal("fixed node was disabled or unpinned after a transient failure")
 	}
+	// Clear only the local pacing record to model a later retry after the
+	// external proxy machine has had time to change its own upstream node.
+	e.collection.doc.Searches[s.backupKey] = collectionSearch{}
 	s.nextProbe = time.Time{}
 	s.cursor = 0
 	e.refresh(context.Background(), s, false)
-	if brokenCalls.Load() != 1 {
-		t.Fatal("failed node retried automatically")
+	if brokenCalls.Load() != 2 {
+		t.Fatal("fixed node was not retried in place")
 	}
-	if err := e.pool.Change([]string{e.routes[0].ID}, "available", "manual", false); err != nil {
-		t.Fatal(err)
+}
+
+func TestFixedRouteRequestFailureDoesNotFallBackToHealthyLocalRoute(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	e, _ := testEngine(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		complete(w, fakeToken(10, 240))
+	}))
+	e.config.PoolEnabled = true
+	e.config.PinnedRoute = e.routes[0].ID
+	e.config.Collection.StandbyTarget = 0
+	other := e.routes[0]
+	other.ID = "healthy-local-route"
+	e.routes = append(e.routes, other)
+	e.routes[0].Transport = &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return nil, context.DeadlineExceeded
+	}}
+	s, _ := e.borrow(request(generation, "fixed-request-failure").Header)
+	defer release(s)
+	token, _ := turnstate.Parse(fakeToken(10, 239))
+	if !s.state.Offer(token, 0, time.Now()) {
+		t.Fatal("failed to seed fixed-route ticket")
 	}
-	if e.effectivePinnedRoute() != e.routes[0].ID {
-		t.Fatal("manual restore did not reactivate fixed node")
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, request(generation, "fixed-request-failure"))
+	if w.Code != http.StatusBadGateway || upstreamCalls.Load() != 0 {
+		t.Fatalf("fixed request fell back to another local route: status=%d upstream=%d", w.Code, upstreamCalls.Load())
+	}
+	if e.pool.Get(e.routes[0].ID).State != "available" || e.effectivePinnedRoute() != e.routes[0].ID {
+		t.Fatal("fixed route was disabled or unpinned after request failure")
+	}
+	if active, ok := s.state.Acquire(time.Now()); !ok || active.Token.Fingerprint != token.Fingerprint {
+		t.Fatal("fixed request failure removed the existing ticket")
 	}
 }
 

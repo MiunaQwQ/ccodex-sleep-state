@@ -84,6 +84,10 @@ func TestRandomEgressExcludesHarvestAndParked(t *testing.T) {
 	if route, err := e.selectEgress(0, true); err != nil || route != 1 {
 		t.Fatal(route, err)
 	}
+	e.pool.Change([]string{"b"}, "failed", "network_failed", false)
+	if route, err := e.selectEgress(0, true); err != nil || route != 1 {
+		t.Fatal("fixed failed route switched to another exit", route, err)
+	}
 }
 func TestSingleNodeProbeKeepsExistingActive(t *testing.T) {
 	calls := 0
