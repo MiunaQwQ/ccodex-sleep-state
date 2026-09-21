@@ -6,8 +6,9 @@
 
 [下载发布版](https://github.com/NanSsye/ccodex-sleep-state/releases) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/NanSsye/ccodex-sleep-state/issues) · [上游项目](https://github.com/gylive/ccodex-sleep-state)
 
-## 当前版本：r21
+## 当前版本：r22
 
+- **刷新不再拉动页面**：管理面板自动刷新时保持当前可见票池或对话卡片的位置，倒计时和诊断变化不会把页面推回顶部；卡片展开状态继续保留。本版本暂不修改压缩请求票据处理。
 - **紧凑对话卡片**：折叠显示模型、当前状态、请求次数和实际节点，展开查看明细。没有在途请求且空闲 10 分钟后自动移出页面；点击右上角 × 可手动移除，有新请求时自动重现。
 - **修正取消误判**：完成事件已完整写出后，客户端正常关闭连接仍记为完整返回；真正中断、请求超时、服务停止和上游失败分开显示。
 
@@ -49,12 +50,12 @@
 
 前提是 Codex 已完成自己的登录或 API 配置。下载 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 中与电脑匹配的文件，完整解压：
 
-| 电脑 | r21 文件 | 启动入口 |
+| 电脑 | r22 文件 | 启动入口 |
 | --- | --- | --- |
-| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r21-windows-amd64.zip` | `start.cmd` |
-| Windows ARM64 | `ccodex-sleep-state-r21-windows-arm64.zip` | `start.cmd` |
-| Mac Apple Silicon | `ccodex-sleep-state-r21-darwin-arm64.tar.gz` | `start.command` |
-| Mac Intel | `ccodex-sleep-state-r21-darwin-amd64.tar.gz` | `start.command` |
+| Windows Intel / AMD 64 位 | `ccodex-sleep-state-r22-windows-amd64.zip` | `start.cmd` |
+| Windows ARM64 | `ccodex-sleep-state-r22-windows-arm64.zip` | `start.cmd` |
+| Mac Apple Silicon | `ccodex-sleep-state-r22-darwin-arm64.tar.gz` | `start.command` |
+| Mac Intel | `ccodex-sleep-state-r22-darwin-amd64.tar.gz` | `start.command` |
 
 1. 双击对应启动脚本，保持终端窗口运行。
 2. 浏览器打开本地面板；没有配置过节点时，在「订阅与代理」添加自己的来源。
@@ -76,7 +77,7 @@
 
 Windows CMD 对应 `ccodex-sleep-state.exe setup`。退出用 `Ctrl+C`，等待配置恢复完成。升级前停止旧程序，替换程序和文档，保留自己的配置与数据目录。
 
-所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r21-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
+所有发布包只含程序、启动脚本、教程、版本信息和许可证，**不含维护者的节点、订阅、票、登录凭据、管理口令或运行日志**。下载后用 `ccodex-sleep-state-r22-SHA256SUMS.txt` 核对文件；源码包附锁定的 Go 依赖及其许可证。
 
 [Windows 教程](docs/windows.md) · [macOS 教程](docs/macos.md) · [面板教程](docs/web-panel.md) · [代理与订阅](docs/proxies.md)
 

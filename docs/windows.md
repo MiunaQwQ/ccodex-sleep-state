@@ -6,7 +6,7 @@
 
 ## 1. 完整解压，不要只拖出 exe
 
-到 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 下载 ZIP。大多数电脑选 `windows-amd64`；Windows ARM 选 `windows-arm64`。核对来源和 `ccodex-sleep-state-r21-SHA256SUMS.txt`，再完整解压到自己的目录，例如：
+到 [Releases](https://github.com/NanSsye/ccodex-sleep-state/releases) 下载 ZIP。大多数电脑选 `windows-amd64`；Windows ARM 选 `windows-arm64`。核对来源和 `ccodex-sleep-state-r22-SHA256SUMS.txt`，再完整解压到自己的目录，例如：
 
 ```text
 %LOCALAPPDATA%\Programs\ccodex-sleep-state

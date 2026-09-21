@@ -141,6 +141,28 @@ function textNode(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
+function capturePageScroll() {
+  const candidates = [...document.querySelectorAll("#sessions > [data-scroll-key], #conversations > [data-conversation]")];
+  const visible = candidates.find((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 76 && rect.top < window.innerHeight - 20;
+  });
+  return {
+    top: window.scrollY,
+    key: visible?.dataset.scrollKey || visible?.dataset.conversation || "",
+    offset: visible?.getBoundingClientRect().top,
+  };
+}
+function restorePageScroll(snapshot) {
+  if (!snapshot) return;
+  const anchor = [...document.querySelectorAll("#sessions > [data-scroll-key], #conversations > [data-conversation]")]
+    .find((element) => (element.dataset.scrollKey || element.dataset.conversation) === snapshot.key);
+  if (anchor && Number.isFinite(snapshot.offset)) {
+    window.scrollBy(0, anchor.getBoundingClientRect().top - snapshot.offset);
+    return;
+  }
+  window.scrollTo(0, snapshot.top);
+}
 function refresh() {
   if (!refreshing) refreshing = refreshStatus().finally(() => { refreshing = null; });
   return refreshing;
@@ -179,6 +201,7 @@ async function refreshStatus() {
     $("fallback-select").value = state.state_fallback || "strict";
   if (!timingDirty) fillTiming(state.timing);
   const traffic = state.traffic || { total: 0, failed: 0, recent: [] };
+  const pageScroll = capturePageScroll();
   renderConversations(traffic);
   $("step-config").textContent = state.configured_codex
     ? "已接入 · 可检查或修复"
@@ -231,6 +254,7 @@ async function refreshStatus() {
     if (!session.id) {
       const row = textNode("div", "", "session");
       row.dataset.sessionModel = session.model;
+      row.dataset.scrollKey = `session:${session.model}:empty`;
       const detail = textNode("div", "", "session-detail");
       const heading = textNode("div", "", "session-heading");
       heading.append(textNode("strong", `票池 ${number} · ${session.model}`, "session-title"), textNode("span", "等待首次请求", "session-badge"));
@@ -253,6 +277,7 @@ async function refreshStatus() {
       description += ` · 备用 state ${session.standby} 张`;
     const row = textNode("div", "", "session");
     row.dataset.sessionModel = session.model;
+    row.dataset.scrollKey = `session:${session.model}:${session.id}`;
     const heading = textNode("div", "", "session-heading");
     const phaseNames = {ready:"主用未到期",search_queued:"等待采集",upstream_paused:"上游暂停",collecting:"正在采集",waiting_for_state:"等待主用",auth_blocked:"登录 / 权限异常",rate_limited:"上游限流"};
     heading.append(textNode("strong", `票池 ${number} · ${session.model}`, "session-title"), textNode("span", phaseNames[session.phase] || phases[session.phase] || session.phase, `session-badge ${session.usable ? "is-ready" : "is-pending"}`));
@@ -450,6 +475,7 @@ async function refreshStatus() {
     $("sessions").append(row);
   }
   if (focusedSession) [...$("sessions").querySelectorAll("[data-session-details]")].find(el => el.dataset.sessionDetails === focusedSession)?.querySelector("summary")?.focus({preventScroll:true});
+  restorePageScroll(pageScroll);
   renderNodeResults();
  renderNodeLatency();
   if (typeof loadLifecyclePool === "function" && !document.querySelector('[data-view="pool"]').hidden)
