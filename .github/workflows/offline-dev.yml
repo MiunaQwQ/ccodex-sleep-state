@@ -1,0 +1,35 @@
+name: Offline development dependencies
+on:
+  push:
+    branches: [feat/verified-tickets-1024proxy]
+    paths: [.github/workflows/offline-dev.yml]
+permissions:
+  contents: read
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: Package only public toolchain and vendored dependencies
+        shell: bash
+        run: |
+          go mod vendor
+          mkdir -p "$RUNNER_TEMP/offline/go"
+          cp -a "$(go env GOROOT)/." "$RUNNER_TEMP/offline/go/"
+          cp -a vendor "$RUNNER_TEMP/offline/vendor"
+          go version > "$RUNNER_TEMP/offline/TOOLCHAIN_VERSION"
+          tar -C "$RUNNER_TEMP/offline" -czf "$RUNNER_TEMP/offline-dev.tar.gz" go vendor TOOLCHAIN_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-dev-linux-amd64
+          path: ${{ runner.temp }}/offline-dev.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
