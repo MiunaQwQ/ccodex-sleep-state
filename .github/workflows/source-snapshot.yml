@@ -1,0 +1,29 @@
+name: Source snapshot
+on:
+  push:
+    branches: [feat/verified-tickets-1024proxy]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/source"
+          git archive --format=zip --prefix=ccodex-sleep-state/ HEAD > "$RUNNER_TEMP/source/ccodex-sleep-state-source.zip"
+          git rev-parse HEAD > "$RUNNER_TEMP/source/SOURCE_COMMIT"
+          cd "$RUNNER_TEMP/source"
+          sha256sum ccodex-sleep-state-source.zip > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot-${{ github.sha }}
+          path: ${{ runner.temp }}/source/
+          retention-days: 7
+          if-no-files-found: error
